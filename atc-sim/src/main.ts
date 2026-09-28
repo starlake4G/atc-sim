@@ -3,6 +3,9 @@
  *
  * 组装：世界模型 + 视图层 + 指令层。渲染循环只负责把真实经过时间喂给世界，
  * 其余全部由定步长 tick 驱动。
+ *
+ * 主舞台固定 16:9，3D 视景是主视图（塔台 / 跟机），雷达屏缩成舞台内的方形小窗，
+ * 需要精确引导时用 F1 把雷达放大成全屏。
  */
 
 import './styles.css';
@@ -10,6 +13,7 @@ import { AIRPORT } from './data/airports/aurora';
 import { createWorld, stepWorld, selectedAircraft, commandAircraft } from './sim/world';
 import { RadarView } from './views/radar';
 import { SceneView } from './views/scene';
+import { STAGE_H, STAGE_W, setStageScale } from './views/stage';
 import { CommandBar } from './ui/commands';
 import { AircraftList } from './ui/list';
 import { RadioLog } from './ui/radio';
@@ -25,19 +29,22 @@ const world = createWorld({
   seed: 20260927,
 });
 
-// ---------------------------------------------------------------- 布局
+// ---------------------------------------------------------------- 16:9 舞台
 
-const shell = document.createElement('div');
-shell.className = 'shell';
+const stage = document.createElement('div');
+stage.className = 'stage';
 
-const viewHost = document.createElement('div');
-viewHost.className = 'radar-host';
+const viewLayer = document.createElement('div');
+viewLayer.className = 'stage-view mode-3d';
 
-const sidebar = document.createElement('div');
-sidebar.className = 'sidebar';
+const radarHost = document.createElement('div');
+radarHost.className = 'radar-host';
 
-shell.append(viewHost, sidebar);
-app.append(shell);
+const side = document.createElement('div');
+side.className = 'side';
+
+stage.append(viewLayer, side);
+app.append(stage);
 
 // ---------------------------------------------------------------- 视图
 
@@ -53,21 +60,19 @@ const scene = new SceneView(AIRPORT, {
   },
 });
 
-let currentView: ViewMode = 'radar';
+// 挂载顺序即叠放顺序：3D 铺满 → 雷达小窗 → 指令条
+scene.mount(viewLayer);
+radar.mount(radarHost);
+viewLayer.append(radarHost);
 
-radar.mount(viewHost);
-scene.mount(viewHost);
-scene.setVisible(false);
-
-// 指令条浮动在视图层之上（两个视角共用），飞机列表与电台记录放侧栏
 const commandBar = new CommandBar(world);
-commandBar.mount(viewHost);
+commandBar.mount(viewLayer);
 
 const aircraftList = new AircraftList(world);
-aircraftList.mount(sidebar);
+aircraftList.mount(side);
 
 const radioLog = new RadioLog(world);
-radioLog.mount(sidebar);
+radioLog.mount(side);
 
 const hud = new Hud(world, {
   onTimeScale: (s) => {
@@ -78,19 +83,46 @@ const hud = new Hud(world, {
     world.paused = !world.paused;
   },
   onViewChange: (mode) => setView(mode),
-  onResetView: () => {
-    if (currentView === 'radar') radar.resetView();
-  },
+  onResetView: () => resetView(),
 });
-hud.mount(app);
+hud.mount(stage);
+
+/** 3D 主视图下雷达小窗是否露出 */
+let radarInset = true;
+let currentView: ViewMode = 'tower';
 
 function setView(mode: ViewMode): void {
   currentView = mode;
   hud.setView(mode);
-  radar.setVisible(mode === 'radar');
-  scene.setVisible(mode !== 'radar');
-  if (mode !== 'radar') scene.setMode(mode === 'tower' ? 'tower' : 'follow');
+  const is3d = mode !== 'radar';
+  viewLayer.classList.toggle('mode-3d', is3d);
+  viewLayer.classList.toggle('mode-radar', !is3d);
+  scene.setVisible(is3d);
+  radar.setVisible(is3d ? radarInset : true);
+  if (is3d) scene.setMode(mode === 'tower' ? 'tower' : 'follow');
 }
+
+function resetView(): void {
+  if (currentView === 'radar' || radarInset) radar.resetView();
+  if (currentView === 'tower') scene.setMode('tower');
+}
+
+/**
+ * 舞台缩放：1600×900 虚拟分辨率整体 scale 到窗口内，比例恒定 16:9。
+ * 缩放比要先写进 stage.ts，再让两个视图重建后备缓冲，否则放大档位下发虚。
+ */
+function fitStage(): void {
+  const s = Math.min(window.innerWidth / STAGE_W, window.innerHeight / STAGE_H);
+  setStageScale(s);
+  stage.style.transform = `scale(${s})`;
+  radar.rescale();
+  scene.rescale();
+}
+
+window.addEventListener('resize', fitStage);
+fitStage();
+
+setView('tower');
 
 // ---------------------------------------------------------------- 键盘
 
@@ -120,7 +152,13 @@ window.addEventListener('keydown', (e) => {
       break;
     case 'r':
     case 'R':
-      if (currentView === 'radar') radar.resetView();
+      resetView();
+      break;
+    case 'm':
+    case 'M':
+      radarInset = !radarInset;
+      viewLayer.classList.toggle('hide-radar', !radarInset);
+      radar.setVisible(currentView === 'radar' || radarInset);
       break;
     case 'Tab':
       e.preventDefault();
@@ -173,11 +211,11 @@ function frame(now: number): void {
 
 requestAnimationFrame(frame);
 
-// 支持 ?view=tower / ?view=follow 直接进入指定视角（调试与分享用）
+// 支持 ?view=radar|tower|follow 直接进入指定视角（调试与分享用）
 {
   const params = new URLSearchParams(location.search);
   const v = params.get('view');
-  if (v === 'tower' || v === 'follow') {
+  if (v === 'radar' || v === 'tower' || v === 'follow') {
     // 跟机视角必须有一架选中飞机，没选就自动选第一架
     if (v === 'follow' && world.selectedId === null && world.aircraft.length > 0) {
       world.selectedId = world.aircraft[0].id;
@@ -190,7 +228,9 @@ requestAnimationFrame(frame);
 Object.assign(window as unknown as Record<string, unknown>, {
   __world: world,
   __scene: scene,
+  __radar: radar,
   __hud: hud,
+  __stage: stage,
   __setView: setView,
   __command: (id: number, cmd: unknown) => commandAircraft(world, id, cmd as never),
   __selected: () => selectedAircraft(world),

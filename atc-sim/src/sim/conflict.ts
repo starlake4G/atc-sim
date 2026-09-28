@@ -30,6 +30,11 @@ export const DEFAULT_THRESHOLDS: ConflictThresholds = {
   criticalWindow: 60,
 };
 
+/** 是否参与空中间隔探测：地面等待与落地滑跑都不算 */
+function isAirborne(ac: Aircraft): boolean {
+  return ac.phase !== 'GROUND' && ac.phase !== 'LANDED';
+}
+
 /** 单对飞机的冲突判定 */
 export function evaluatePair(
   a: Aircraft,
@@ -37,8 +42,10 @@ export function evaluatePair(
   wind: Wind,
   th: ConflictThresholds,
 ): ConflictPair | null {
-  // 已落地/未起飞的飞机不参与
-  if (a.phase === 'LANDED' || b.phase === 'LANDED') return null;
+  // 空中间隔只对"都在空中"的飞机成立。两条跑道头各停一架等待机时，
+  // 它们水平相距不到 3 NM、高差为 0，参与判定就是必然的"失去间隔"红牌，
+  // 而玩家此刻没有任何手段避免 —— 跑道占用属于 P2 地面域，不在这里判。
+  if (!isAirborne(a) || !isAirborne(b)) return null;
 
   const dx = b.pos.x - a.pos.x;
   const dy = b.pos.y - a.pos.y;

@@ -113,7 +113,7 @@ export function createWorld(opts: WorldOptions): World {
     if (ac) {
       world.aircraft.push(ac);
       world.traffic.nextId++;
-      pushLog(world, `[${ac.callsign}]>[APP] ${star} 进场进入雷达管制，请求引导`, 'pilot');
+      pushLog(world, `[${ac.callsign}]>[${stationOf(ac)}] ${star} 进场进入雷达管制，请求引导`, 'pilot');
     }
   }
 
@@ -148,10 +148,14 @@ export function findAircraft(world: World, id: number): Aircraft | undefined {
   return world.aircraft.find((a) => a.id === id);
 }
 
-/** 该机当前所属管制席位：离场与已清进近的进场归塔台，其余进场归进近 */
-export function stationOf(ac: Aircraft): 'TWR' | 'APP' {
-  if (ac.isDeparture) return 'TWR';
-  return ac.phase === 'APPROACH' || ac.phase === 'GO_AROUND' ? 'TWR' : 'APP';
+/**
+ * 该机当前所属管制席位。
+ *
+ * 只有一个塔台席位：进近席位没有移交玩法，只是把同一批指令换个标签，
+ * 徒增无线电噪声和"我是不是管错段"的困惑。P2 地面管制域再引入 GND。
+ */
+export function stationOf(_ac: Aircraft): 'TWR' {
+  return 'TWR';
 }
 
 export function selectedAircraft(world: World): Aircraft | null {
@@ -377,8 +381,9 @@ function updateConflicts(world: World): void {
         pushLog(world, `严重冲突：${callsigns}`, 'bad');
         break;
       default:
-        penalize(world.score, acA, `pred-${key}`, PENALTY.predicted, 'Predicted conflict', world.time);
-        pushLog(world, `冲突告警：${callsigns}`, 'bad');
+        // 预测级只提示不扣分：300 s 前瞻下的"将来可能太近"不是违规，
+        // 为消警去做无意义绕飞才是坏玩法
+        pushLog(world, `间隔提醒：${callsigns}`, 'info');
         break;
     }
   }

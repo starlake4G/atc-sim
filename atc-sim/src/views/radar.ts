@@ -12,6 +12,7 @@ import type { World } from '../sim/world';
 import { findAircraft } from '../sim/world';
 import { m2ft, m2nm, ms2kt, norm360 } from '../sim/units';
 import { reciprocalIdent } from '../sim/airport';
+import { getStageScale, scaledPixelRatio } from './stage';
 
 const COLORS = {
   bg: '#070C0E',
@@ -88,11 +89,14 @@ export class RadarView {
     this.container.remove();
   }
 
-  /** 视角切换时显示/隐藏 */
+  /** 视角切换时显示/隐藏；隐藏时不再重绘（3D 主视图下小窗可能被 M 键收起） */
   setVisible(v: boolean): void {
+    this.visible = v;
     this.container.style.display = v ? 'block' : 'none';
     if (v) this.resize();
   }
+
+  private visible = true;
 
   // -------------------------------------------------------------------------
   // 交互
@@ -107,7 +111,8 @@ export class RadarView {
 
     this.canvas.addEventListener('pointermove', (e) => {
       if (!this.dragging) return;
-      const scale = this.pxPerMeter();
+      // 屏幕像素 → 舞台像素要除掉缩放比
+      const scale = this.pxPerMeter() * getStageScale();
       this.panX = this.dragStart.panX - (e.clientX - this.dragStart.x) / scale;
       this.panY = this.dragStart.panY + (e.clientY - this.dragStart.y) / scale;
     });
@@ -131,8 +136,9 @@ export class RadarView {
 
   private handleClick(e: PointerEvent): void {
     const rect = this.canvas.getBoundingClientRect();
-    const mx = e.clientX - rect.left;
-    const my = e.clientY - rect.top;
+    const s = getStageScale();
+    const mx = (e.clientX - rect.left) / s;
+    const my = (e.clientY - rect.top) / s;
     let best: number | null = null;
     let bestD = 26;
     for (const t of this.hitTargets) {
@@ -162,15 +168,21 @@ export class RadarView {
   // -------------------------------------------------------------------------
 
   private resize(): void {
-    const rect = this.container.getBoundingClientRect();
-    this.dpr = window.devicePixelRatio || 1;
-    this.width = Math.max(1, rect.width);
-    this.height = Math.max(1, rect.height);
+    // 用 offsetWidth/Height：getBoundingClientRect 会被舞台的 transform 一起放大，
+    // 而 canvas 的 CSS 尺寸要的是未缩放布局尺寸，只有后备缓冲才按缩放比放大
+    this.width = Math.max(1, this.container.offsetWidth);
+    this.height = Math.max(1, this.container.offsetHeight);
+    this.dpr = scaledPixelRatio();
     this.canvas.width = Math.floor(this.width * this.dpr);
     this.canvas.height = Math.floor(this.height * this.dpr);
     this.canvas.style.width = `${this.width}px`;
     this.canvas.style.height = `${this.height}px`;
     this.ctx.setTransform(this.dpr, 0, 0, this.dpr, 0, 0);
+  }
+
+  /** 舞台缩放比变了（窗口改变大小）后重建后备缓冲 */
+  rescale(): void {
+    this.resize();
   }
 
   private pxPerMeter(): number {
@@ -190,6 +202,7 @@ export class RadarView {
   // -------------------------------------------------------------------------
 
   update(world: World): void {
+    if (!this.visible) return;
     const ctx = this.ctx;
     ctx.fillStyle = COLORS.bg;
     ctx.fillRect(0, 0, this.width, this.height);

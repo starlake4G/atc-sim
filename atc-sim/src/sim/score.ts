@@ -27,9 +27,8 @@ export function createScoreState(): ScoreState {
   return { score: 0, events: [], landed: 0, departed: 0, violations: 0, yellow: 0, red: 0, history: [] };
 }
 
-/** 扣分表 */
+/** 扣分表（预测级冲突只提示不扣分，见 world.ts） */
 export const PENALTY = {
-  predicted: 2,
   critical: 5,
   loss: 15,
   goAround: 4,

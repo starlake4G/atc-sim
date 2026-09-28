@@ -18,9 +18,10 @@ import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import type { Airport, Runway } from '../sim/types';
 import type { World } from '../sim/world';
 import { selectedAircraft } from '../sim/world';
-import { deg2rad } from '../sim/units';
+import { deg2rad, m2ft, ms2kt } from '../sim/units';
 import { along, headingToVec } from '../sim/vec';
 import { skyAt, type SkyState } from './daycycle';
+import { scaledPixelRatio } from './stage';
 
 export type SceneMode = 'tower' | 'follow';
 
@@ -48,6 +49,9 @@ export class SceneView {
   private visible = false;
 
   private models = new Map<number, THREE.Group>();
+  /** 3D 主视图下的飞机标牌（HTML 浮层，由相机投影定位） */
+  private labelLayer = document.createElement('div');
+  private labels = new Map<number, HTMLElement>();
   private materials: {
     arrival: THREE.Material[];
     departure: THREE.Material[];
@@ -95,6 +99,9 @@ export class SceneView {
     this.renderer.setClearColor(0x0d1a21, 1);
     this.container.appendChild(this.renderer.domElement);
     this.renderer.domElement.className = 'scene-view';
+
+    this.labelLayer.className = 'labels';
+    this.container.append(this.labelLayer);
 
     this.scene = new THREE.Scene();
     this.scene.fog = new THREE.Fog(0x0a1418, 3000, 26000);
@@ -163,6 +170,7 @@ export class SceneView {
   setVisible(v: boolean): void {
     this.visible = v;
     this.container.style.display = v ? 'block' : 'none';
+    this.labelLayer.style.display = v ? 'block' : 'none';
     if (v) this.resize();
   }
 
@@ -186,12 +194,19 @@ export class SceneView {
   private lastFollowId: number | null = null;
 
   private resize(): void {
-    const rect = this.container.getBoundingClientRect();
-    const w = Math.max(1, rect.width);
-    const h = Math.max(1, rect.height);
+    // clientWidth/Height 是未缩放的布局尺寸：canvas 靠 CSS 铺满容器，
+    // 只有绘制缓冲要按舞台缩放比放大，否则放大档位下发虚
+    const w = Math.max(1, this.container.clientWidth);
+    const h = Math.max(1, this.container.clientHeight);
+    this.renderer.setPixelRatio(scaledPixelRatio());
     this.renderer.setSize(w, h, false);
     this.camera.aspect = w / h;
     this.camera.updateProjectionMatrix();
+  }
+
+  /** 舞台缩放比变了（窗口改变大小）后重建后备缓冲 */
+  rescale(): void {
+    this.resize();
   }
 
   // -------------------------------------------------------------------------
@@ -697,6 +712,7 @@ export class SceneView {
     this.updateCamera(world);
 
     if (this.mode === 'tower') this.controls.update();
+    this.updateLabels(world);
     this.renderer.render(this.scene, this.camera);
   }
 
@@ -776,6 +792,8 @@ export class SceneView {
       if (!seen.has(id)) {
         this.scene.remove(group);
         this.models.delete(id);
+        this.labels.get(id)?.remove();
+        this.labels.delete(id);
       }
     }
 
@@ -787,6 +805,53 @@ export class SceneView {
     } else {
       this.selectionRing.visible = false;
     }
+  }
+
+  /**
+   * 标牌层。3D 当主视图后这是"能不能拿来玩"的分水岭 ——
+   * 光看几何体分辨不出高度和速度，玩家就没法在 3D 里下指令。
+   */
+  private updateLabels(world: World): void {
+    this.camera.updateMatrixWorld();
+    const w = this.container.clientWidth;
+    const h = this.container.clientHeight;
+    for (const ac of world.aircraft) {
+      const el = this.labelFor(ac.id);
+      const p = toThree(ac.pos.x, ac.pos.y, ac.pos.z).project(this.camera);
+      const onScreen = p.z < 1 && Math.abs(p.x) <= 1.08 && Math.abs(p.y) <= 1.08;
+      if (!onScreen) {
+        el.style.display = 'none';
+        continue;
+      }
+      el.style.display = 'block';
+      el.style.left = `${((p.x + 1) / 2) * w}px`;
+      el.style.top = `${((1 - p.y) / 2) * h}px`;
+
+      const altFt = Math.round(m2ft(ac.pos.z) / 100) * 100;
+      const trend = ac.vs > 1 ? '↑' : ac.vs < -1 ? '↓' : '';
+      el.textContent = `${ac.callsign} ${altFt}${trend} ${Math.round(ms2kt(ac.ias))}kt`;
+
+      const bad = world.conflicts.some((c) => c.a === ac.id || c.b === ac.id);
+      const cls = bad
+        ? 'label label-bad'
+        : world.selectedId === ac.id
+          ? 'label label-sel'
+          : ac.isDeparture
+            ? 'label label-dep'
+            : 'label label-air';
+      if (el.className !== cls) el.className = cls;
+    }
+  }
+
+  private labelFor(id: number): HTMLElement {
+    let el = this.labels.get(id);
+    if (!el) {
+      el = document.createElement('div');
+      el.className = 'label';
+      this.labelLayer.append(el);
+      this.labels.set(id, el);
+    }
+    return el;
   }
 
   private updateCamera(world: World): void {

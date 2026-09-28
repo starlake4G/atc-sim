@@ -9,7 +9,7 @@ import { AIRPORT } from '../src/data/airports/aurora';
 import { createAircraft } from '../src/sim/aircraft';
 import { spawnArrival, spawnDeparture } from '../src/sim/traffic';
 import { canClearApproach } from '../src/ui/commands';
-import { createWorld, stepWorld, commandAircraft, worldStats } from '../src/sim/world';
+import { createWorld, stepWorld, commandAircraft, worldStats, stationOf } from '../src/sim/world';
 import { angleDiff, ft2m, kt2ms, m2ft, m2nm, ms2kt, nm2m, norm360 } from '../src/sim/units';
 import { headingToVec } from '../src/sim/vec';
 
@@ -283,6 +283,31 @@ console.log('\n[10] 起飞滑跑保持跑道航向');
 // ---------------------------------------------------------------------------
 // 链路级断言：上面各组只测部件，这三组测"主玩法能不能真的跑通"
 // ---------------------------------------------------------------------------
+
+console.log('\n[14] 冲突分域与罚则减负');
+{
+  const w = createWorld({ airport: AIRPORT, seed: 104 });
+  w.aircraft.length = 0;
+  const d1 = spawnDeparture(990, AIRPORT, '18L', 'AURORA1D', 0, w.rand);
+  const d2 = spawnDeparture(991, AIRPORT, '18R', 'AURORA2D', 0, w.rand);
+  if (d1 && d2) {
+    w.aircraft.push(d1, d2);
+    advance(30, w);
+    check('两架跑道外等待机不再互判失去间隔', w.conflicts.length === 0 && w.score.red === 0, `${w.conflicts.length} 对 / 红牌 ${w.score.red}`);
+  }
+
+  const w2 = createWorld({ airport: AIRPORT, seed: 105 });
+  w2.aircraft.length = 0;
+  inject(w2, { id: 992, x: -40000, y: 0, zFt: 20000, heading: 90, iasKt: 300 });
+  inject(w2, { id: 993, x: 40000, y: 0, zFt: 20000, heading: 270, iasKt: 300 });
+  advance(60, w2);
+  check('预测级冲突仍然告警', w2.conflicts.some((c) => c.severity === 'PREDICTED'), `${w2.conflicts.length} 对`);
+  check('预测级冲突不扣分不亮牌', w2.score.score === 0 && w2.score.yellow === 0, `分数 ${w2.score.score}，黄牌 ${w2.score.yellow}`);
+
+  const w3 = createWorld({ airport: AIRPORT, seed: 106 });
+  const arr = w3.aircraft.find((a) => !a.isDeparture);
+  check('席位只剩塔台（进近席位已并入）', arr !== undefined && stationOf(arr) === 'TWR');
+}
 
 console.log('\n[11] 航路推进（回归：绕点死循环）');
 {

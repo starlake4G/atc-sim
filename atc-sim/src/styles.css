@@ -31,21 +31,60 @@ body {
 }
 
 #app {
-  height: 100%;
+  position: fixed;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+  background: #04070a;
 }
 
 /* ------------------------------------------------------------------ 布局 */
 
-.shell {
-  display: flex;
-  height: 100%;
-  padding-top: 44px;
+/*
+ * 主舞台固定 16:9（1600×900 虚拟分辨率排版，整体 scale 贴合窗口）：
+ * 3D 视景是按 16:9 做的构图（塔台机位、跑道横向排布、标牌密度），
+ * 窗口比例一变要么裁掉跑道要么留大片空地，所以宁可留黑边也不变形。
+ */
+.stage {
+  position: relative;
+  width: 1600px;
+  height: 900px;
+  flex: none;
+  transform-origin: 50% 50%;
+  overflow: hidden;
+  background: var(--bg);
+  box-shadow: 0 0 0 1px var(--line), 0 18px 60px rgba(0, 0, 0, 0.6);
+}
+
+.stage-view {
+  position: absolute;
+  inset: 0;
 }
 
 .radar-host {
-  position: relative;
-  flex: 1;
-  min-width: 0;
+  position: absolute;
+  inset: 0;
+}
+
+/* 3D 为主视图时，雷达缩成舞台内的方形小窗（仍可点选、可缩放）；
+   放在左上而不是左下，避免和底部居中的指令条抢位置 */
+.stage-view.mode-3d .radar-host {
+  left: 14px;
+  top: 52px;
+  right: auto;
+  bottom: auto;
+  width: 300px;
+  aspect-ratio: 1 / 1;
+  border: 1px solid var(--line-2);
+  border-radius: 6px;
+  overflow: hidden;
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.5);
+}
+
+.stage-view.mode-3d.hide-radar .radar-host {
+  display: none;
 }
 
 .radar-view,
@@ -71,20 +110,61 @@ body {
   overflow: hidden;
 }
 
-.sidebar {
-  width: 330px;
-  flex-shrink: 0;
-  border-left: 1px solid var(--line);
-  background: var(--panel);
-  overflow-y: auto;
+/* 3D 标牌层：由相机投影定位，不吞鼠标（否则会挡住塔台环视拖拽） */
+.labels {
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+  pointer-events: none;
+  z-index: 8;
+}
+
+.label {
+  position: absolute;
+  transform: translate(-50%, -140%);
+  padding: 1px 5px;
+  border: 1px solid currentColor;
+  border-radius: 3px;
+  background: rgba(4, 8, 10, 0.62);
+  font-size: 11px;
+  line-height: 1.5;
+  white-space: nowrap;
+  color: var(--text-dim);
+}
+
+.label-air {
+  color: var(--accent);
+}
+
+.label-dep {
+  color: var(--accent-2);
+}
+
+.label-sel {
+  color: #fff;
+  background: rgba(4, 8, 10, 0.85);
+}
+
+.label-bad {
+  color: var(--danger);
+}
+
+.side {
+  position: absolute;
+  top: 48px;
+  right: 10px;
+  bottom: 96px;
+  width: min(26%, 320px);
   display: flex;
   flex-direction: column;
+  gap: 8px;
+  z-index: 12;
 }
 
 /* ------------------------------------------------------------------- HUD */
 
 .hud {
-  position: fixed;
+  position: absolute;
   top: 0;
   left: 0;
   right: 0;
@@ -94,8 +174,9 @@ body {
   justify-content: space-between;
   gap: 16px;
   padding: 0 14px;
-  background: var(--panel);
+  background: rgba(14, 22, 25, 0.88);
   border-bottom: 1px solid var(--line);
+  backdrop-filter: blur(4px);
   z-index: 20;
 }
 
@@ -156,7 +237,7 @@ body {
 /* ---------------------------------------------------------------- 告警条 */
 
 .hud-alert {
-  position: fixed;
+  position: absolute;
   top: 52px;
   left: 50%;
   transform: translateX(-50%);
@@ -204,8 +285,8 @@ body {
   display: none;
   flex-direction: column;
   gap: 7px;
-  min-width: 540px;
-  max-width: min(920px, 92%);
+  min-width: 480px;
+  max-width: min(920px, 68%);
   padding: 10px 14px;
   background: rgba(14, 22, 25, 0.93);
   border: 1px solid var(--line-2);
@@ -361,8 +442,21 @@ body {
 
 .al-panel {
   flex: none;
-  padding: 10px 12px 6px;
-  border-bottom: 1px solid var(--line);
+  max-height: 46%;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  padding: 8px 10px;
+  background: rgba(14, 22, 25, 0.86);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  backdrop-filter: blur(4px);
+}
+
+/* 列表本身要能滚：3D 主视图下侧栏是浮层，飞机一多不封顶就会顶掉无线电 */
+.al-body {
+  min-height: 0;
+  overflow-y: auto;
 }
 
 .al-head,
@@ -420,6 +514,9 @@ body {
 .al-info {
   color: var(--text-dim);
   flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
   text-align: right;
   font-variant-numeric: tabular-nums;
 }
@@ -450,7 +547,11 @@ body {
   min-height: 0;
   display: flex;
   flex-direction: column;
-  padding: 10px 12px;
+  padding: 8px 10px;
+  background: rgba(14, 22, 25, 0.86);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  backdrop-filter: blur(4px);
 }
 
 .rl-body {
@@ -474,6 +575,11 @@ body {
   color: var(--text-dim2);
   flex: none;
   font-variant-numeric: tabular-nums;
+}
+
+.rl-text {
+  min-width: 0;
+  overflow-wrap: anywhere;
 }
 
 .rl-atc .rl-text {
