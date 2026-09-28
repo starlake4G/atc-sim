@@ -15,10 +15,10 @@
 
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
-import type { Airport, Runway } from '../sim/types';
+import type { Aircraft, Airport, Runway } from '../sim/types';
 import type { World } from '../sim/world';
-import { selectedAircraft } from '../sim/world';
-import { deg2rad, m2ft, m2nm, ms2kt, rad2deg } from '../sim/units';
+import { selectedAircraft, TICK_DT } from '../sim/world';
+import { angleDiff, deg2rad, m2ft, m2nm, ms2kt, norm360, rad2deg } from '../sim/units';
 import { along, headingToVec } from '../sim/vec';
 import { skyAt, type SkyState } from './daycycle';
 import { scaledPixelRatio } from './stage';
@@ -31,9 +31,19 @@ export interface SceneViewCallbacks {
 
 const toThree = (x: number, y: number, z: number): THREE.Vector3 => new THREE.Vector3(x, z, -y);
 
-/** 标牌每帧算，复用两个向量免得制造垃圾 */
+/** 每帧复用的临时对象，免得在渲染循环里制造垃圾 */
 const scratchPos = new THREE.Vector3();
 const scratchNdc = new THREE.Vector3();
+const scratchOff = new THREE.Vector3();
+const WORLD_UP = new THREE.Vector3(0, 1, 0);
+
+/** 一帧的渲染变换：世界坐标（米）+ 航向（度） */
+interface RenderTf {
+  x: number;
+  y: number;
+  z: number;
+  heading: number;
+}
 
 const COLOR_ARRIVAL = 0x6fe3c4;
 const COLOR_DEPARTURE = 0xef9f27;
@@ -182,20 +192,33 @@ export class SceneView {
     this.mode = mode;
     if (mode === 'tower') {
       this.controls.enabled = true;
+      this.controls.enablePan = true;
+      this.controls.minDistance = 20;
+      this.controls.maxDistance = 4000;
       this.camera.position.copy(this.towerAnchor);
       this.controls.target.copy(this.towerTarget);
       this.controls.update();
     } else {
-      this.controls.enabled = false;
-      // 切到跟机时相机必须立刻到位，否则会从上一个机位平滑飞过去（要等半秒）
-      this.snapNextFrame = true;
+      // 跟机视角同样交给 OrbitControls：玩家要能绕着飞机转、能拉远拉近。
+      // 每帧只做一件事 —— 把轨道中心平移到飞机上，于是玩家选定的相对角度保持不变。
+      this.controls.enabled = true;
+      this.controls.enablePan = false;
+      this.controls.minDistance = 45;
+      this.controls.maxDistance = 1500;
+      this.followId = null; // 换目标时重给一个标准机后机位
     }
   }
 
-  /** 下一帧相机是否直接定位（不做插值） */
-  private snapNextFrame = false;
-  /** 跟机视角当前跟随的飞机 id */
-  private lastFollowId: number | null = null;
+  /**
+   * 渲染插值用：逻辑是 20 Hz 离散步进，渲染是自由帧率。
+   * 不做插值的话，跟机视角里飞机和背景都是 50 ms 一跳。
+   */
+  private prevTf = new Map<number, RenderTf>();
+  private curTf = new Map<number, RenderTf>();
+  private lastSimTime = -1;
+  /** 跟机视角：当前跟的飞机与上一帧航向（用来让相机随机头一起转） */
+  private followId: number | null = null;
+  private followHeading = 0;
 
   private resize(): void {
     // clientWidth/Height 是未缩放的布局尺寸：canvas 靠 CSS 铺满容器，
@@ -711,13 +734,42 @@ export class SceneView {
   update(world: World): void {
     if (!this.visible) return;
 
-    this.applySky(world);
-    this.syncAircraft(world);
-    this.updateCamera(world);
+    // 逻辑 20 Hz、渲染自由帧率：每来一个新 tick 就把"当前"降级为"上一帧位置"，
+    // 再按累积器余量在两者之间插值。不做这步，跟机视角里一切都 50 ms 一跳。
+    if (world.time !== this.lastSimTime) {
+      const fresh = new Map<number, RenderTf>();
+      for (const ac of world.aircraft) {
+        fresh.set(ac.id, { x: ac.pos.x, y: ac.pos.y, z: ac.pos.z, heading: ac.heading });
+      }
+      // 只往前走了一个 tick 才插值；中间跳了帧（切过视角、暂停过、新出现的飞机）
+      // 就拿当前值当上一帧，否则会从现在的位置"糊"回很久以前的位置
+      const stepped = this.lastSimTime >= 0 && world.time - this.lastSimTime <= TICK_DT * 1.5;
+      this.lastSimTime = world.time;
+      this.prevTf = stepped ? this.curTf : fresh;
+      this.curTf = fresh;
+    }
+    const alpha = Math.max(0, Math.min(1, world.accumulator / TICK_DT));
 
-    if (this.mode === 'tower') this.controls.update();
-    this.updateLabels(world);
+    this.applySky(world);
+    this.syncAircraft(world, alpha);
+    this.updateCamera(world, alpha);
+
+    // 两种模式都要 update()：塔台是阻尼环视，跟机是"绕着飞机转"
+    this.controls.update();
+    this.updateLabels(world, alpha);
     this.renderer.render(this.scene, this.camera);
+  }
+
+  /** 某机本帧该画在哪儿：上一 tick 与本 tick 之间按余量插值 */
+  private renderTf(ac: Aircraft, alpha: number): RenderTf {
+    const p = this.prevTf.get(ac.id);
+    if (!p) return { x: ac.pos.x, y: ac.pos.y, z: ac.pos.z, heading: ac.heading };
+    return {
+      x: p.x + (ac.pos.x - p.x) * alpha,
+      y: p.y + (ac.pos.y - p.y) * alpha,
+      z: p.z + (ac.pos.z - p.z) * alpha,
+      heading: norm360(p.heading + angleDiff(ac.heading, p.heading) * alpha),
+    };
   }
 
   /** 把昼夜循环的快照应用到天空/灯光/雾/航站楼亮窗 */
@@ -764,7 +816,7 @@ export class SceneView {
     fog.far = far;
   }
 
-  private syncAircraft(world: World): void {
+  private syncAircraft(world: World, alpha: number): void {
     const seen = new Set<number>();
 
     for (const ac of world.aircraft) {
@@ -776,8 +828,9 @@ export class SceneView {
         this.models.set(ac.id, group);
       }
 
-      group.position.copy(toThree(ac.pos.x, ac.pos.y, ac.pos.z));
-      group.rotation.y = -deg2rad(ac.heading);
+      const tf = this.renderTf(ac, alpha);
+      group.position.set(tf.x, tf.z, -tf.y);
+      group.rotation.y = -deg2rad(tf.heading);
       // 转弯时轻微压坡度，视觉上更自然
       const bank = Math.max(-0.45, Math.min(0.45, -ac.turnRate * 0.09));
       group.rotation.z = bank;
@@ -798,14 +851,17 @@ export class SceneView {
         this.models.delete(id);
         this.labels.get(id)?.remove();
         this.labels.delete(id);
+        this.prevTf.delete(id);
+        this.curTf.delete(id);
       }
     }
 
     // 选中环
     const sel = selectedAircraft(world);
     if (sel) {
+      const tf = this.renderTf(sel, alpha);
       this.selectionRing.visible = true;
-      this.selectionRing.position.copy(toThree(sel.pos.x, sel.pos.y, sel.pos.z));
+      this.selectionRing.position.set(tf.x, tf.z, -tf.y);
     } else {
       this.selectionRing.visible = false;
     }
@@ -818,7 +874,7 @@ export class SceneView {
    * 两种形态：在画内是跟随飞机的信息牌；出画则贴到屏幕边缘变成方位标
    * （塔台视角只看得到本场附近，远端待管制的航班全在画外，不给指向就找不到）。
    */
-  private updateLabels(world: World): void {
+  private updateLabels(world: World, alpha: number): void {
     this.camera.updateMatrixWorld();
     const w = this.container.clientWidth;
     const h = this.container.clientHeight;
@@ -836,7 +892,8 @@ export class SceneView {
             ? 'label label-dep'
             : 'label label-air';
 
-      scratchPos.set(ac.pos.x, ac.pos.z, -ac.pos.y);
+      const tf = this.renderTf(ac, alpha);
+      scratchPos.set(tf.x, tf.z, -tf.y);
       const p = scratchNdc.copy(scratchPos).project(this.camera);
       if (p.z < 1 && Math.abs(p.x) <= 1 && Math.abs(p.y) <= 1) {
         el.className = base;
@@ -885,45 +942,51 @@ export class SceneView {
     return el;
   }
 
-  private updateCamera(world: World): void {
+  /**
+   * 跟机相机。
+   *
+   * 不再"追"飞机 —— 那是抖动的根源：目标每 50 ms 跳一步，而相机用固定 lerp
+   * 系数去追，永远差着一截，距离和高低就在两帧之间来回摆。
+   * 改成把轨道中心平移到飞机的插值位置、相机保持与中心的相对偏移：
+   * 飞机在画面里纹丝不动，而那个偏移归 OrbitControls 管，
+   * 玩家照样能拖着转角度、滚轮拉距离。
+   * 偏移再随机头一起转，所以飞机转向时相机跟着绕过去，不会变成侧视或前视。
+   */
+  private updateCamera(world: World, alpha: number): void {
     if (this.mode !== 'follow') return;
 
     const ac = selectedAircraft(world);
     if (!ac) {
       // 没选中就退回塔台机位
+      this.followId = null;
+      this.controls.target.copy(this.towerTarget);
       this.camera.position.copy(this.towerAnchor);
-      this.camera.lookAt(this.towerTarget);
       return;
     }
 
-    // 换选中目标时相机直接就位，避免从上一机位/塔台慢速漂移
-    if (this.lastFollowId !== ac.id) {
-      this.lastFollowId = ac.id;
-      this.snapNextFrame = true;
+    const tf = this.renderTf(ac, alpha);
+    scratchPos.set(tf.x, tf.z, -tf.y);
+
+    if (this.followId !== ac.id) {
+      // 换目标：直接给一个机后标准机位，不做过渡（过渡会晃半秒）
+      this.followId = ac.id;
+      this.followHeading = tf.heading;
+      const back = headingToVec(tf.heading + 180);
+      this.controls.target.copy(scratchPos);
+      this.camera.position.set(scratchPos.x + back.x * 150, scratchPos.y + 45, scratchPos.z - back.y * 150);
+      return;
     }
 
-    const headingRad = deg2rad(ac.heading);
-    // 航向单位向量（Three 空间）：(sin h, 0, -cos h)；后方取反
-    const backX = -Math.sin(headingRad);
-    const backZ = Math.cos(headingRad);
+    scratchOff.copy(this.camera.position).sub(this.controls.target);
+    const dHdg = angleDiff(tf.heading, this.followHeading);
+    this.followHeading = tf.heading;
+    if (dHdg !== 0) scratchOff.applyAxisAngle(WORLD_UP, -deg2rad(dHdg));
+    if (scratchOff.lengthSq() < 1) scratchOff.set(0, 40, -150);
+    // 相机不许钻到地面以下
+    const minY = this.airport.elevation + 6 - scratchPos.y;
+    if (scratchOff.y < minY) scratchOff.y = minY;
 
-    const target = toThree(ac.pos.x, ac.pos.y, ac.pos.z);
-    const distance = Math.max(70, Math.min(420, 70 + ac.ias * 0.5));
-    // 抬高比例决定俯视角：0.28 约 16°，能看清飞机姿态又不至于变成纯俯视
-    const height = distance * 0.28;
-
-    const camPos = new THREE.Vector3(
-      target.x + backX * distance,
-      target.y + height,
-      target.z + backZ * distance,
-    );
-
-    if (this.snapNextFrame) {
-      this.camera.position.copy(camPos);
-      this.snapNextFrame = false;
-    } else {
-      this.camera.position.lerp(camPos, 0.18);
-    }
-    this.camera.lookAt(target.x, target.y, target.z);
+    this.controls.target.copy(scratchPos);
+    this.camera.position.copy(scratchPos).add(scratchOff);
   }
 }
