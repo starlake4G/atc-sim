@@ -9,6 +9,7 @@ import { AIRPORT } from '../src/data/airports/aurora';
 import { createAircraft } from '../src/sim/aircraft';
 import { spawnArrival, spawnDeparture } from '../src/sim/traffic';
 import { canClearApproach } from '../src/ui/commands';
+import { capacityFor, createScoreState, penalize, ratesFor, scoreLanding } from '../src/sim/score';
 import { createWorld, stepWorld, commandAircraft, worldStats, stationOf, runwayOccupant } from '../src/sim/world';
 import { angleDiff, ft2m, kt2ms, m2ft, m2nm, ms2kt, nm2m, norm360 } from '../src/sim/units';
 import { headingToVec } from '../src/sim/vec';
@@ -371,6 +372,7 @@ console.log('\n[15] 指令条门控 + 端到端落地链路');
     const rw = AIRPORT.runways[0]; // 18L
     const ALT_STEPS = [12000, 8000, 6000, 4000, 3000];
     let cleared = false;
+    let clearedRunway = '';
     let slowed = false;
     const steps = Math.round((40 * 60) / DT);
     for (let i = 0; i < steps && arr.phase !== 'LANDED'; i++) {
@@ -382,9 +384,12 @@ console.log('\n[15] 指令条门控 + 端到端落地链路');
       const axial = (arr.pos.x - rw.threshold.x) * u.x + (arr.pos.y - rw.threshold.y) * u.y;
       const dNm = m2nm(Math.abs(axial));
       const latNm = m2nm(Math.abs((arr.pos.x - rw.threshold.x) * -u.y + (arr.pos.y - rw.threshold.y) * u.x));
-      if (!cleared && axial < 0 && dNm < 15 && latNm < 2 && altFt < 6000) {
-        commandAircraft(w, arr.id, { kind: 'clearedApproach', runway: rw.ident });
-        cleared = true;
+      if (!cleared && axial < 0 && dNm < 18 && latNm < 2.5 && altFt < 6000) {
+        // 想落的跑道被等待机占着 —— 真实塔台的做法是先把它放出去，而不是换跑道硬塞
+        const occ = runwayOccupant(w, rw.ident, arr.id);
+        if (occ && occ.phase === 'GROUND') commandAircraft(w, occ.id, { kind: 'takeoff' });
+        cleared = commandAircraft(w, arr.id, { kind: 'clearedApproach', runway: rw.ident });
+        clearedRunway = rw.ident;
       }
       if (!slowed && ms2kt(arr.ias) > 210 && dNm < 45) {
         commandAircraft(w, arr.id, { kind: 'speed', value: kt2ms(210) });
@@ -404,9 +409,57 @@ console.log('\n[15] 指令条门控 + 端到端落地链路');
     check(
       '沿 STAR 进场的航班最终落地',
       arr.phase === 'LANDED',
-      `phase=${arr.phase}，距场 ${m2nm(Math.hypot(arr.pos.x, arr.pos.y)).toFixed(1)} NM`,
+      `phase=${arr.phase}，许可跑道 ${clearedRunway || '-'}，距场 ${m2nm(Math.hypot(arr.pos.x, arr.pos.y)).toFixed(1)} NM`,
     );
   }
+}
+
+// ---------------------------------------------------------------------------
+
+console.log('\n[16] 节奏与正反馈');
+{
+  check('容量 4 起步', capacityFor(0) === 4, `${capacityFor(0)} 架`);
+  const r = ratesFor(capacityFor(0));
+  check('流率够密（进场 ≥ 20 架/小时）', r.arrivals >= 20, `进 ${r.arrivals} / 离 ${r.departures} 架每小时`);
+
+  const st = createScoreState();
+  const ac = createAircraft({ id: 1, callsign: 'TEST1', type: 'A320', pos: { x: 0, y: 0, z: 100 }, heading: 180, ias: 70 }, 0);
+  scoreLanding(st, ac, '18L', '18L', 0);
+  const first = st.score;
+  scoreLanding(st, ac, '18L', '18L', 1);
+  check('连续干净落地给连击加成', st.score - first > first, `首架 +${first}，次架 +${st.score - first}`);
+  penalize(st, ac, 'test-flag', 5, '测试扣分', 2);
+  check('吃牌连击归零', st.streak === 0);
+  scoreLanding(st, ac, '18L', '18L', 3);
+  check('连击重新从 1 开始', st.streak === 1);
+  check('扣分事件是中文', st.events.some((e) => e.reason === '测试扣分' && e.delta === -5));
+
+  // 离场机堆满两个入口的话，四个方向的落地许可会被占用互锁全部驳回
+  const w = createWorld({ airport: AIRPORT, seed: 109 });
+  advance(1800, w);
+  const waiting = w.aircraft.filter((a) => a.phase === 'GROUND').length;
+  check(
+    '无人干预 30 分钟后等待机不超过跑道数',
+    waiting <= w.airport.runways.length,
+    `${waiting} 架等待 / ${w.airport.runways.length} 条跑道，在场 ${w.aircraft.length}`,
+  );
+}
+
+console.log('\n[17] 加速下降真的更快');
+{
+  const w = createWorld({ airport: AIRPORT, seed: 108 });
+  w.aircraft.length = 0;
+  const ac = inject(w, { id: 1010, x: -20000, y: 20000, zFt: 16000, heading: 180, iasKt: 260 });
+  commandAircraft(w, 1010, { kind: 'altitude', value: ft2m(4000) });
+  advance(30, w);
+  const base = Math.abs(ac.vs);
+  commandAircraft(w, 1010, { kind: 'expedite' });
+  advance(20, w);
+  check('加速下降超过标准垂直率', Math.abs(ac.vs) > base * 1.15, `${base.toFixed(1)} → ${Math.abs(ac.vs).toFixed(1)} m/s`);
+  check('加速下降不改变目标高度', Math.abs(m2ft(ac.intent.altitude) - 4000) < 200, `${m2ft(ac.intent.altitude).toFixed(0)} ft`);
+  const t0 = w.time;
+  for (let i = 0; i < Math.round(360 / DT) && Math.abs(ac.intent.altitude - ac.pos.z) > ft2m(200); i++) stepWorld(w, DT);
+  check('接近改平时自动解除加速', ac.intent.expedite === false, `${(w.time - t0).toFixed(0)}s 后 alt=${m2ft(ac.pos.z).toFixed(0)} ft`);
 }
 
 // ---------------------------------------------------------------------------

@@ -187,7 +187,7 @@ body {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 16px;
+  gap: 10px;
   padding: 0 14px;
   background: rgba(14, 22, 25, 0.88);
   border-bottom: 1px solid var(--line);
@@ -198,7 +198,7 @@ body {
 .hud-group {
   display: flex;
   align-items: center;
-  gap: 12px;
+  gap: 8px;
   white-space: nowrap;
 }
 
@@ -634,7 +634,7 @@ body {
 
 .hud-chip {
   font-size: 11px;
-  padding: 2px 9px;
+  padding: 2px 7px;
   border-radius: 10px;
   border: 1px solid var(--line-2);
   color: var(--text-dim2);
@@ -655,4 +655,76 @@ body {
 .hud-chip.red {
   border-color: #5c2a2a;
   color: #f1948f;
+}
+
+.hud-chip.streak {
+  opacity: 0.5;
+}
+
+.hud-chip.streak.hot {
+  opacity: 1;
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+/* ---------------------------------------------------------- 计分弹字/闪动 */
+
+.pop {
+  position: absolute;
+  left: 50%;
+  top: 30%;
+  transform: translateX(-50%);
+  padding: 4px 16px;
+  font-size: 30px;
+  font-weight: 600;
+  letter-spacing: 0.05em;
+  white-space: nowrap;
+  pointer-events: none;
+  z-index: 30;
+  animation: pop-rise 1.7s ease-out forwards;
+}
+
+.pop-good {
+  color: var(--ok);
+  text-shadow: 0 0 20px rgba(111, 227, 196, 0.45);
+}
+
+.pop-up {
+  top: 22%;
+  font-size: 21px;
+  color: var(--accent-2);
+  text-shadow: 0 0 20px rgba(239, 159, 39, 0.4);
+}
+
+@keyframes pop-rise {
+  0% {
+    opacity: 0;
+    transform: translate(-50%, 14px) scale(0.92);
+  }
+  16% {
+    opacity: 1;
+    transform: translate(-50%, 0) scale(1.05);
+  }
+  70% {
+    opacity: 1;
+  }
+  100% {
+    opacity: 0;
+    transform: translate(-50%, -28px) scale(1);
+  }
+}
+
+.hud-chip.flash {
+  animation: chip-flash 0.9s ease-out;
+}
+
+@keyframes chip-flash {
+  0%,
+  55% {
+    background: rgba(226, 75, 74, 0.32);
+    color: #fff;
+  }
+  100% {
+    background: transparent;
+  }
 }

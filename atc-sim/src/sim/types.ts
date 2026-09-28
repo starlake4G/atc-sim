@@ -95,6 +95,11 @@ export interface AircraftIntent {
   speed: number;
   /** 是否保持当前速度（不自动调速） */
   speedLocked: boolean;
+  /**
+   * 加速爬升/下降：用满机型垂直包线、不做接近收敛。
+   * 由 expedite 指令置位，收到新的高度指令或已改平即清除。
+   */
+  expedite: boolean;
 }
 
 /** 指令判别联合 */

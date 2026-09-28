@@ -235,6 +235,7 @@ export function createAircraft(o: SpawnOptions, now: number): Aircraft {
     altitude: o.pos.z,
     speed: o.ias,
     speedLocked: false,
+    expedite: false,
   };
   return {
     id: o.id,
@@ -269,10 +270,10 @@ export function createAircraft(o: SpawnOptions, now: number): Aircraft {
 /** 下达指令（进入复诵队列） */
 export function issueCommand(ac: Aircraft, cmd: Command, now: number, delay = READBACK_DELAY): void {
   const family = commandFamily(cmd);
-  const text = describeCommand(cmd);
+  const text = describeCommand(cmd, ac);
   // 连点同一指令时保持队列里那条原样生效 —— 重新排队会把 executeAt 一次次推后，
   // 指令永远执行不了
-  if (ac.pending.some((p) => commandFamily(p.command) === family && describeCommand(p.command) === text)) {
+  if (ac.pending.some((p) => commandFamily(p.command) === family && describeCommand(p.command, ac) === text)) {
     ac.lastInstruction = text;
     return;
   }
@@ -290,7 +291,6 @@ function commandFamily(c: Command): string {
     case 'direct':
       return 'lateral';
     case 'altitude':
-    case 'expedite':
       return 'vertical';
     case 'speed':
     case 'resumeNormalSpeed':
@@ -301,7 +301,7 @@ function commandFamily(c: Command): string {
 }
 
 /** 指令的无线电用语（管制指令与飞行员复诵共用同一份措辞） */
-export function describeCommand(c: Command): string {
+export function describeCommand(c: Command, ac?: Aircraft): string {
   switch (c.kind) {
     case 'heading':
       return `航向${String(Math.round(norm360(c.value))).padStart(3, '0')}`;
@@ -322,7 +322,8 @@ export function describeCommand(c: Command): string {
     case 'hold':
       return `${c.fix}等待`;
     case 'expedite':
-      return '加速下降';
+      // 同一条指令在爬升和下降里是两句话，别一律念成"加速下降"
+      return ac && ac.intent.altitude >= ac.pos.z ? '加速爬升' : '加速下降';
     case 'resumeNormalSpeed':
       return '恢复正常速度';
     case 'takeoff':
@@ -359,6 +360,8 @@ function applyCommand(ac: Aircraft, cmd: Command, ctx: SimContext): void {
       break;
     case 'altitude':
       ac.intent.altitude = cmd.value;
+      // 新的高度层就是新计划，别再沿用"加速"
+      ac.intent.expedite = false;
       break;
     case 'speed':
       ac.intent.speed = cmd.value;
@@ -368,7 +371,9 @@ function applyCommand(ac: Aircraft, cmd: Command, ctx: SimContext): void {
       ac.intent.speedLocked = false;
       break;
     case 'expedite':
-      ac.intent.altitude = Math.min(ac.intent.altitude, ac.pos.z);
+      // 只加"用满变化率"的旗标，不动目标高度：
+      // 旧实现把目标高度压成当前高度，下降时毫无作用、爬升时反而改平
+      ac.intent.expedite = true;
       break;
     case 'takeoff':
       if (ac.phase === 'GROUND') {
@@ -503,15 +508,23 @@ function applyVertical(ac: Aircraft, ctx: SimContext): void {
   const remaining = ac.intent.altitude - ac.pos.z;
   let targetVs = 0;
 
+  // 提前退出"加速"：全速率冲到目标高度上会来回过冲（每帧 0.7 m 的锯齿，
+  // 阶段位在 CLIMB/DESCENT 之间抖），留 500 ft 交给常规收敛逻辑收尾
+  if (ac.intent.expedite && Math.abs(remaining) < ft2m(500)) ac.intent.expedite = false;
+
   if (Math.abs(remaining) > ALT_DEADBAND) {
+    // 加速爬升/下降允许超过"标准率"，否则这条指令等于没按 ——
+    // sim 平时就已经在用满 perf 变化率了
     if (remaining > 0) {
-      targetVs = ac.perf.climbRate;
+      targetVs = ac.perf.climbRate * (ac.intent.expedite ? 1.2 : 1);
     } else {
-      targetVs = -ac.perf.descentRate;
+      targetVs = -ac.perf.descentRate * (ac.intent.expedite ? 1.35 : 1);
     }
-    // 接近目标高度时收敛，避免过冲
-    const closing = remaining / 4; // 约 4 秒收敛
-    if (Math.abs(closing) < Math.abs(targetVs)) targetVs = closing;
+    // 接近目标高度时收敛，避免过冲；"加速"就是叫它别收敛
+    if (!ac.intent.expedite) {
+      const closing = remaining / 4; // 约 4 秒收敛
+      if (Math.abs(closing) < Math.abs(targetVs)) targetVs = closing;
+    }
   }
 
   // 进近时跟随下滑道：所需下降率（前馈）+ 偏差修正（比例）

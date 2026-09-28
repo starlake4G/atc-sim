@@ -125,9 +125,12 @@ export function expandProcedure(airport: Airport, names: string[]): Vec2[] {
 // 生成进场航班
 // ---------------------------------------------------------------------------
 
-/** 生成点再往外延伸的距离范围（海里），保证从雷达范围外飞进来 */
-const ENTRY_EXTRA_MIN = 8;
-const ENTRY_EXTRA_MAX = 14;
+/**
+ * 出生点在入口 fix 之外多远（海里）。
+ * 再往外推就是"玩家在雷达边上看到它，但要五分钟才有得管"，节奏拖死。
+ */
+const ENTRY_EXTRA_MIN = 3;
+const ENTRY_EXTRA_MAX = 6;
 
 export function spawnArrival(
   id: number,
@@ -151,8 +154,11 @@ export function spawnArrival(
   const heading = norm360(outward + 180);
 
   const type = pickArrivalType(rand);
-  const altFt = 20000 + Math.floor(rand() * 9) * 1000; // FL200–FL280
-  const spdKt = 250 + Math.floor(rand() * 6) * 5; // 250–275 kt
+  // FL140–FL180：按机型 1800–2500 fpm 的最大下降率与 3° 剖面反推的上限。
+  // 再高就必须从 45 NM 外一路放高度才能压住剖面，玩家慢一步就只能眼看它复飞出界 ——
+  // 那是拟真参数压垮游戏性，不是难度
+  const altFt = 14000 + Math.floor(rand() * 5) * 1000; // FL140–FL180
+  const spdKt = 240 + Math.floor(rand() * 5) * 5; // 240–260 kt
 
   const ac = createAircraft(
     {
@@ -246,6 +252,10 @@ function pickDepartureType(rand: () => number): string {
 
 /**
  * 按流率推进生成累积器。返回值是本步新生成的飞机（可能为空数组）。
+ *
+ * canUseRunway：离场机只能排在"当前没被占用"的跑道头上。否则两条跑道的入口
+ * 各堆一架等待机之后，四个方向的落地许可会被占用互锁全部驳回 ——
+ * 玩家必须先把等待机放出去，否则整个场面无解。
  */
 export function updateTraffic(
   state: TrafficState,
@@ -256,6 +266,7 @@ export function updateTraffic(
   rand: () => number,
   activeCount: number,
   maxActive: number,
+  canUseRunway?: (ident: string) => boolean,
 ): Aircraft[] {
   const out: Aircraft[] = [];
   if (activeCount >= maxActive) return out;
@@ -280,10 +291,22 @@ export function updateTraffic(
 
   // ---- 离场 ----
   state.departureAcc += (rates.departures / 3600) * dt;
+  // 同一次调用里也要互斥（world.aircraft 还没并入本批新飞机）
+  const taken: string[] = [];
   while (state.departureAcc >= 1) {
     state.departureAcc -= 1;
     if (baseRunways.length === 0 || sidNames.length === 0) break;
-    const rw = baseRunways[Math.floor(rand() * baseRunways.length)];
+    const free = baseRunways
+      .map((r) => r.ident)
+      .filter((id) => !taken.includes(id) && (!canUseRunway || canUseRunway(id)));
+    if (free.length === 0) {
+      // 没有空闲跑道头：把这架退回队列，别堆到入口上把落地也堵死
+      state.departureAcc = 0.999;
+      break;
+    }
+    const rwIdent = free[Math.floor(rand() * free.length)];
+    taken.push(rwIdent);
+    const rw = baseRunways.find((r) => r.ident === rwIdent)!;
     const sid = sidNames[Math.floor(rand() * sidNames.length)];
     const ac = spawnDeparture(state.nextId, airport, rw.ident, sid, now, rand);
     if (ac) {

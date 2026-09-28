@@ -10,11 +10,7 @@
  */
 
 import * as THREE from 'three';
-
-/** 一整个昼夜对应的现实秒数（1× 倍速下） */
-export const FULL_DAY_SECONDS = 1440;
-/** 对局开始时的时刻（小时） */
-export const DAY_START_HOUR = 7.5;
+import { dayHour } from '../sim/clock';
 
 export interface SkyState {
   /** 当前时刻 0–24 */
@@ -102,7 +98,7 @@ const blendColor = (dst: THREE.Color, a: THREE.Color, b: THREE.Color, t: number)
   dst.copy(a).lerp(b, t);
 
 export function skyAt(timeSec: number, storm: boolean, dst?: SkyState): SkyState {
-  const hour = (DAY_START_HOUR + (timeSec / FULL_DAY_SECONDS) * 24) % 24;
+  const hour = dayHour(timeSec);
   const elev = sunElevationAt(hour);
 
   // 三个光照 regime 的权重：白天 / 晨昏 / 夜

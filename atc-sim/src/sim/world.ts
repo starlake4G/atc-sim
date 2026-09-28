@@ -216,7 +216,7 @@ export function commandAircraft(world: World, id: number, cmd: Command): boolean
 
   issueCommand(ac, cmd, world.time);
   ac.hasBeenControlled = true;
-  pushLog(world, `[${stationOf(ac)}]>[${ac.callsign}] ${describeCommand(cmd)}`, 'atc');
+  pushLog(world, `[${stationOf(ac)}]>[${ac.callsign}] ${describeCommand(cmd, ac)}`, 'atc');
   return true;
 }
 
@@ -254,7 +254,7 @@ function simulateTick(world: World, dt: number): void {
     wind: world.weather.wind,
     // 指令到期生效时记录飞行员复诵（与下发之间隔着 2.5s 复诵延迟）
     onExecuted: (ac, cmd) => {
-      pushLog(world, `[${ac.callsign}]>[${stationOf(ac)}] ${describeCommand(cmd)}，${ac.callsign}`, 'pilot');
+      pushLog(world, `[${ac.callsign}]>[${stationOf(ac)}] ${describeCommand(cmd, ac)}，${ac.callsign}`, 'pilot');
     },
   };
 
@@ -276,6 +276,8 @@ function simulateTick(world: World, dt: number): void {
     world.rand,
     world.aircraft.length,
     world.capacity + SPAWN_HEADROOM,
+    // 离场机只往空闲的跑道头排，否则两个入口堆满之后所有方向的落地许可都被驳回
+    (ident) => runwayOccupant(world, ident, -1) === null,
   );
   for (const ac of spawned) {
     world.aircraft.push(ac);
@@ -329,13 +331,13 @@ function handleEvents(world: World, ac: Aircraft): void {
 
   // ---- 复飞 ----
   if (prev === 'APPROACH' && ac.phase === 'GO_AROUND') {
-    penalize(world.score, ac, 'evt-goaround', PENALTY.goAround, 'Go around', world.time);
+    penalize(world.score, ac, 'evt-goaround', PENALTY.goAround, '复飞', world.time);
     pushLog(world, `${ac.callsign} 复飞！`, 'bad');
   }
 
   // ---- 穿越雷暴 ----
   if (world.weather.storm && inStorm(world.weather, ac.pos.x, ac.pos.y) && ac.pos.z < ft2m(30000)) {
-    penalize(world.score, ac, 'evt-storm', 4, 'Entered thunderstorm', world.time);
+    penalize(world.score, ac, 'evt-storm', 4, '误入雷暴', world.time);
     pushLog(world, `${ac.callsign} 误入雷暴！`, 'bad');
   }
 
@@ -343,7 +345,7 @@ function handleEvents(world: World, ac: Aircraft): void {
   const dist = Math.hypot(ac.pos.x, ac.pos.y);
   if (dist > world.airport.radarRange * 1.2) {
     if (!ac.isDeparture && ac.phase !== 'LANDED') {
-      penalize(world.score, ac, 'evt-out', PENALTY.outOfBounds, 'Left control area', world.time);
+      penalize(world.score, ac, 'evt-out', PENALTY.outOfBounds, '飞出管制区', world.time);
       pushLog(world, `${ac.callsign} 已飞出管制区`, 'bad');
     } else if (ac.isDeparture) {
       pushLog(world, `${ac.callsign} 移交区调，再见`, 'info');
@@ -418,12 +420,12 @@ function updateConflicts(world: World): void {
 
     switch (p.severity) {
       case 'LOSS':
-        penalize(world.score, acA, `loss-${key}`, PENALTY.loss, 'Loss of separation', world.time, 'red');
-        penalize(world.score, acB, `loss-${key}`, PENALTY.loss, 'Loss of separation', world.time, 'red');
+        penalize(world.score, acA, `loss-${key}`, PENALTY.loss, '失去间隔', world.time, 'red');
+        penalize(world.score, acB, `loss-${key}`, PENALTY.loss, '失去间隔', world.time, 'red');
         pushLog(world, `失去间隔：${callsigns}！`, 'bad');
         break;
       case 'CRITICAL':
-        penalize(world.score, acA, `crit-${key}`, PENALTY.critical, 'Critical conflict', world.time);
+        penalize(world.score, acA, `crit-${key}`, PENALTY.critical, '严重冲突', world.time);
         pushLog(world, `严重冲突：${callsigns}`, 'bad');
         break;
       default:

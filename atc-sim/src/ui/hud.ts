@@ -5,6 +5,7 @@
 import type { World } from '../sim/world';
 import { worldStats } from '../sim/world';
 import { rankLabel } from '../sim/score';
+import { clockString } from '../sim/clock';
 
 export type ViewMode = 'radar' | 'tower' | 'follow';
 
@@ -36,12 +37,20 @@ export class Hud {
   private chipDeparted: HTMLElement;
   private chipYellow: HTMLElement;
   private chipRed: HTMLElement;
+  private chipStreak: HTMLElement;
   private alertEl: HTMLElement;
   private viewButtons = new Map<ViewMode, HTMLElement>();
   private speedButtons = new Map<number, HTMLElement>();
   private pauseBtn: HTMLElement;
 
   private currentView: ViewMode = 'radar';
+
+  /** 舞台浮层宿主（分数弹字要贴着画面中心，不是贴着文档） */
+  private popHost: HTMLElement | null = null;
+  private lastEventCount = 0;
+  private lastCapacity: number | null = null;
+  private lastYellow = 0;
+  private lastRed = 0;
 
   constructor(world: World, cb: HudCallbacks) {
     this.world = world;
@@ -70,12 +79,14 @@ export class Hud {
     this.chipDeparted = chip('起飞', 'good');
     this.chipYellow = chip('黄牌', 'yellow');
     this.chipRed = chip('红牌', 'red');
+    this.chipStreak = chip('连击', 'streak');
     mid.append(
       this.timeEl,
       this.trafficEl,
       this.windEl,
       this.chipLanding,
       this.chipDeparted,
+      this.chipStreak,
       this.chipYellow,
       this.chipRed,
     );
@@ -129,6 +140,7 @@ export class Hud {
   }
 
   mount(parent: HTMLElement): void {
+    this.popHost = parent;
     parent.append(this.root, this.alertEl);
   }
 
@@ -149,15 +161,36 @@ export class Hud {
     this.scoreEl.textContent = String(st.score);
     this.rankEl.textContent = rankLabel(st.score);
 
-    const mm = Math.floor(st.time / 60);
-    const ss = Math.floor(st.time % 60);
-    this.timeEl.textContent = `${String(mm).padStart(2, '0')}:${String(ss).padStart(2, '0')}`;
+    // 游戏内钟表（1 现实分钟 = 1 游戏小时）：比"开局第几分第几秒"更能让人
+    // 把天黑、开灯、班次这些因果串起来
+    this.timeEl.textContent = clockString(st.time);
     this.trafficEl.textContent = `空中 ${st.airborne} · 地面 ${st.onGround} · 在场 ${st.trafficLoaded}/${st.spawnCeiling} · 容量 ${st.capacity}`;
     this.windEl.textContent = `风 ${String(Math.round(st.windDir)).padStart(3, '0')}° / ${st.windSpeedKt.toFixed(0)} kt`;
     this.chipLanding.textContent = `落地 ${st.landings}`;
     this.chipDeparted.textContent = `起飞 ${st.departuresDone}`;
+    this.chipStreak.textContent = `连击 ×${w.score.streak}`;
+    this.chipStreak.classList.toggle('hot', w.score.streak >= 3);
     this.chipYellow.textContent = `黄牌 ${st.yellow}`;
     this.chipRed.textContent = `红牌 ${st.red}`;
+
+    // 正反馈弹字：只给加分事件，违规已经有告警条与牌子闪动
+    const ev = w.score.events;
+    if (ev.length > this.lastEventCount) {
+      const newest = ev.slice(this.lastEventCount).reduce((a, b) => (Math.abs(b.delta) > Math.abs(a.delta) ? b : a));
+      if (newest.delta > 0) this.pop(`+${newest.delta} ${newest.reason}`, 'pop-good');
+    }
+    this.lastEventCount = ev.length;
+
+    // 容量是这套玩法的进度条，得让玩家知道它为什么涨
+    if (this.lastCapacity !== null && st.capacity > this.lastCapacity) {
+      this.pop(`容量提升 · 可同时管 ${st.capacity} 架`, 'pop-up');
+    }
+    this.lastCapacity = st.capacity;
+
+    if (st.yellow > this.lastYellow) this.flash(this.chipYellow);
+    if (st.red > this.lastRed) this.flash(this.chipRed);
+    this.lastYellow = st.yellow;
+    this.lastRed = st.red;
 
     for (const [s, btn] of this.speedButtons) {
       btn.classList.toggle('active', w.timeScale === s && !w.paused);
@@ -183,7 +216,7 @@ export class Hud {
           ? `失去间隔！${st.conflicts} 对冲突`
           : worst === 'CRITICAL'
             ? `严重冲突 ${st.conflicts} 对`
-            : `预测冲突 ${st.conflicts} 对`;
+            : `间隔提醒 ${st.conflicts} 对`;
     } else {
       this.alertEl.style.display = 'none';
       // 最近一条日志用作提示
@@ -194,5 +227,23 @@ export class Hud {
         this.alertEl.textContent = last.text;
       }
     }
+  }
+
+  /** 画面中央的短促弹字（落地 +18、容量提升…），游戏性最便宜的一档投入 */
+  private pop(text: string, cls: string): void {
+    const host = this.popHost;
+    if (!host) return;
+    const el = document.createElement('div');
+    el.className = `pop ${cls}`;
+    el.textContent = text;
+    host.append(el);
+    window.setTimeout(() => el.remove(), 1700);
+  }
+
+  private flash(el: HTMLElement): void {
+    el.classList.remove('flash');
+    // 强制一次重排，否则连续吃两张同色牌时动画不会重放
+    void el.offsetWidth;
+    el.classList.add('flash');
   }
 }

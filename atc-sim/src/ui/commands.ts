@@ -10,17 +10,14 @@
 
 import type { Aircraft, Command } from '../sim/types';
 import type { World } from '../sim/world';
-import { commandAircraft, selectedAircraft, stationOf, runwayOccupant, nearestRunwayIdent } from '../sim/world';
-import { ft2m, kt2ms, m2ft, ms2kt, norm360 } from '../sim/units';
-import { WAKE_LABEL } from '../sim/types';
-import { reciprocalIdent } from '../sim/airport';
+import { commandAircraft, selectedAircraft, runwayOccupant, nearestRunwayIdent } from '../sim/world';
+import { ft2m, kt2ms, m2ft, m2nm, ms2kt, norm360 } from '../sim/units';
+import { findRunway, reciprocalIdent } from '../sim/airport';
 
-/** 下降高度预设（英尺） */
-const ALT_PRESETS_DESCENT = [3000, 4000, 6000, 8000, 12000];
-/** 爬升/复飞高度预设（英尺） */
-const ALT_PRESETS_CLIMB = [4000, 6000, 8000, 12000];
-/** 速度预设（节） */
-const SPD_PRESETS = [250, 220, 210, 180, 160];
+/** 3° 下滑剖面：每海里约 318 ft */
+const PROFILE_FT_PER_NM = 318;
+/** 速度预设（节）—— 只留三档，五档里那三个数字没人分得清该点哪个 */
+const SPD_PRESETS = [250, 210, 180];
 
 const PHASE_LABEL: Record<string, string> = {
   GROUND: '跑道外等待',
@@ -58,8 +55,10 @@ export class CommandBar {
   private phaseEl: HTMLElement;
   private stateEl: HTMLElement;
   private groupsEl: HTMLElement;
-  /** 指令组随 (选中机, 阶段, 是否建立ILS) 变化而重建 */
+  /** 指令组随 (选中机, 阶段, 是否建立ILS, 剖面建议) 变化而重建 */
   private builtKey = '';
+  /** 直飞/等待 位置下拉的当前选择，跨重建保留 */
+  private lastWp = '';
 
   constructor(world: World) {
     this.world = world;
@@ -155,8 +154,12 @@ export class CommandBar {
 
     const established = ac.approach?.slopeCaptured ?? false;
     const busy = this.busyRunways(ac);
+    // 剖面建议高度：它是高度按钮的内容，所以必须进 key，否则数字会过期
+    const rec = ac.isDeparture ? 0 : (this.profileAltFt(ac) ?? 0);
     this.callsignEl.textContent = ac.callsign;
-    this.metaEl.textContent = `${ac.type} · ${WAKE_LABEL[ac.wake]} · ${ac.isDeparture ? '离场' : '进场'} · [${stationOf(ac)}]`;
+    // 尾流类别与席位标签都先去掉：前者没有任何玩法作用（wakeSeparation 零调用），
+    // 后者只有一个值 —— 对新手这两样都是纯噪声
+    this.metaEl.textContent = `${ac.type} · ${ac.isDeparture ? '离场' : '进场'}`;
     this.phaseEl.textContent = PHASE_LABEL[ac.phase] ?? ac.phase;
 
     const altFt = Math.round(m2ft(ac.pos.z) / 100) * 100;
@@ -168,11 +171,55 @@ export class CommandBar {
       `高度 ${altFt} → ${tgtAlt} · 速度 ${spdKt} → ${tgtSpd} kt · 航向 ${hdg}` +
       (ac.lastInstruction ? `　« ${ac.lastInstruction}` : '');
 
-    const key = `${ac.id}:${ac.phase}:${established}:${[...busy].sort().join(',')}`;
+    const key = `${ac.id}:${ac.phase}:${established}:${rec}:${[...busy].sort().join(',')}`;
     if (key !== this.builtKey) {
       this.builtKey = key;
-      this.rebuildGroups(ac, established, busy);
+      this.rebuildGroups(ac, established, busy, rec);
     }
+  }
+
+  /**
+   * 剖面基准跑道：已清进近就用指定的那条，否则取几何上最近的跑道入口。
+   *
+   * 不能复用 nearestRunwayIdent —— 它按"航向差 < 60°"过滤，而进场机在 STAR
+   * 各段上的航向常常与四个跑道方向都差得更远（例如切向飞过的 281°），
+   * 于是返回 null，建议高度就退化成爬升档。
+   */
+  private refRunwayIdent(ac: Aircraft): string | null {
+    if (ac.assignedRunway) return ac.assignedRunway;
+    let best: string | null = null;
+    let bestD = Infinity;
+    for (const rw of this.world.airport.runways) {
+      for (const ident of [rw.ident, reciprocalIdent(rw.ident)]) {
+        const r = findRunway(this.world.airport, ident);
+        if (!r) continue;
+        const d = Math.hypot(ac.pos.x - r.threshold.x, ac.pos.y - r.threshold.y);
+        if (d < bestD) {
+          bestD = d;
+          best = ident;
+        }
+      }
+    }
+    return best;
+  }
+
+  /**
+   * 相对所选跑道入口的 3° 剖面建议高度（英尺，取整到千），进场机专用。
+   *
+   * 用斜距而不是中心线轴向投影：进场机早期在进近走廊外侧，轴向投影会算出
+   * "已经在跑道上方"，于是建议值变成叫它爬升。
+   * 另外建议值永远不低于"当前许可再往下一千"，保证它是往下按的。
+   */
+  private profileAltFt(ac: Aircraft): number | null {
+    if (ac.isDeparture) return null;
+    const ident = this.refRunwayIdent(ac);
+    if (!ident) return null;
+    const rw = findRunway(this.world.airport, ident);
+    if (!rw) return null;
+    const dNm = m2nm(Math.hypot(ac.pos.x - rw.threshold.x, ac.pos.y - rw.threshold.y));
+    const profile = Math.max(3000, Math.round((dNm * PROFILE_FT_PER_NM) / 1000) * 1000);
+    const cur = Math.round(m2ft(ac.intent.altitude) / 1000) * 1000;
+    return Math.max(3000, Math.min(profile, cur - 2000));
   }
 
   /**
@@ -191,7 +238,7 @@ export class CommandBar {
 
   // ---------------------------------------------------------------- 指令组
 
-  private rebuildGroups(ac: Aircraft, established: boolean, busy: Set<string>): void {
+  private rebuildGroups(ac: Aircraft, established: boolean, busy: Set<string>, rec: number): void {
     const g = this.groupsEl;
     g.innerHTML = '';
 
@@ -221,7 +268,7 @@ export class CommandBar {
     }
 
     // 空中：引导 + 高度 + 速度；进近/复飞阶段追加进近许可
-    g.append(this.buildGuideGroup(), this.buildAltGroup(ac), this.buildSpdGroup());
+    g.append(this.buildGuideGroup(), this.buildAltGroup(ac, rec), this.buildSpdGroup());
 
     if (canClearApproach(ac)) {
       const btns: Btn[] = [];
@@ -273,6 +320,11 @@ export class CommandBar {
       opt.textContent = wp.name;
       sel.append(opt);
     }
+    // 指令条会因为剖面建议高度变化而重建，玩家选好的位置不能被冲掉
+    if (this.lastWp) sel.value = this.lastWp;
+    sel.addEventListener('change', () => {
+      this.lastWp = sel.value;
+    });
     const directBtn = el('button', 'btn', '直飞');
     directBtn.dataset.act = 'direct';
     // 点击时读取下拉当前值
@@ -288,15 +340,29 @@ export class CommandBar {
     return wrap;
   }
 
-  private buildAltGroup(ac: Aircraft): HTMLElement {
-    const descending = ac.intent.altitude <= ac.pos.z;
-    const presets = descending ? ALT_PRESETS_DESCENT : ALT_PRESETS_CLIMB;
-    const btns: Btn[] = presets.map((ft) => ({
+  /**
+   * 高度组只给三档，且第一档就是"照 3° 剖面该去的高度"（绿色高亮）。
+   * 六个数字按钮对新手是选择题，三个带建议值的按钮才是操作。
+   */
+  private buildAltGroup(ac: Aircraft, rec: number): HTMLElement {
+    const cur = m2ft(ac.intent.altitude);
+    let steps: number[];
+    if (ac.isDeparture || rec === 0) {
+      const base = Math.max(4000, Math.round(cur / 2000) * 2000);
+      steps = [base + 2000, base + 4000, base + 8000];
+    } else {
+      steps = [rec, rec + 2000, rec + 4000];
+    }
+    const btns: Btn[] = steps.map((ft, i) => ({
       text: ft >= 10000 ? `FL${ft / 100}` : String(ft),
       act: 'alt',
       value: String(ft),
+      cls: i === 0 ? 'ok' : undefined,
     }));
-    if (descending) btns.push({ text: '加速下降', act: 'expedite', cls: 'warn' });
+    const up = ac.intent.altitude >= ac.pos.z;
+    if (Math.abs(ac.intent.altitude - ac.pos.z) > ft2m(1500)) {
+      btns.push({ text: up ? '加速爬升' : '加速下降', act: 'expedite', cls: 'warn' });
+    }
     return this.group('高度', btns);
   }
 
