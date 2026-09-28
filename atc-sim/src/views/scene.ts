@@ -18,7 +18,7 @@ import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import type { Airport, Runway } from '../sim/types';
 import type { World } from '../sim/world';
 import { selectedAircraft } from '../sim/world';
-import { deg2rad, m2ft, ms2kt } from '../sim/units';
+import { deg2rad, m2ft, m2nm, ms2kt, rad2deg } from '../sim/units';
 import { along, headingToVec } from '../sim/vec';
 import { skyAt, type SkyState } from './daycycle';
 import { scaledPixelRatio } from './stage';
@@ -30,6 +30,10 @@ export interface SceneViewCallbacks {
 }
 
 const toThree = (x: number, y: number, z: number): THREE.Vector3 => new THREE.Vector3(x, z, -y);
+
+/** 标牌每帧算，复用两个向量免得制造垃圾 */
+const scratchPos = new THREE.Vector3();
+const scratchNdc = new THREE.Vector3();
 
 const COLOR_ARRIVAL = 0x6fe3c4;
 const COLOR_DEPARTURE = 0xef9f27;
@@ -810,36 +814,63 @@ export class SceneView {
   /**
    * 标牌层。3D 当主视图后这是"能不能拿来玩"的分水岭 ——
    * 光看几何体分辨不出高度和速度，玩家就没法在 3D 里下指令。
+   *
+   * 两种形态：在画内是跟随飞机的信息牌；出画则贴到屏幕边缘变成方位标
+   * （塔台视角只看得到本场附近，远端待管制的航班全在画外，不给指向就找不到）。
    */
   private updateLabels(world: World): void {
     this.camera.updateMatrixWorld();
     const w = this.container.clientWidth;
     const h = this.container.clientHeight;
+    const halfV = deg2rad(this.camera.fov / 2);
+    const halfH = Math.atan(Math.tan(halfV) * this.camera.aspect);
+
     for (const ac of world.aircraft) {
       const el = this.labelFor(ac.id);
-      const p = toThree(ac.pos.x, ac.pos.y, ac.pos.z).project(this.camera);
-      const onScreen = p.z < 1 && Math.abs(p.x) <= 1.08 && Math.abs(p.y) <= 1.08;
-      if (!onScreen) {
-        el.style.display = 'none';
-        continue;
-      }
-      el.style.display = 'block';
-      el.style.left = `${((p.x + 1) / 2) * w}px`;
-      el.style.top = `${((1 - p.y) / 2) * h}px`;
-
-      const altFt = Math.round(m2ft(ac.pos.z) / 100) * 100;
-      const trend = ac.vs > 1 ? '↑' : ac.vs < -1 ? '↓' : '';
-      el.textContent = `${ac.callsign} ${altFt}${trend} ${Math.round(ms2kt(ac.ias))}kt`;
-
       const bad = world.conflicts.some((c) => c.a === ac.id || c.b === ac.id);
-      const cls = bad
+      const base = bad
         ? 'label label-bad'
         : world.selectedId === ac.id
           ? 'label label-sel'
           : ac.isDeparture
             ? 'label label-dep'
             : 'label label-air';
-      if (el.className !== cls) el.className = cls;
+
+      scratchPos.set(ac.pos.x, ac.pos.z, -ac.pos.y);
+      const p = scratchNdc.copy(scratchPos).project(this.camera);
+      if (p.z < 1 && Math.abs(p.x) <= 1 && Math.abs(p.y) <= 1) {
+        el.className = base;
+        el.style.display = 'block';
+        el.style.left = `${((p.x + 1) / 2) * w}px`;
+        el.style.top = `${((1 - p.y) / 2) * h}px`;
+        const altFt = Math.round(m2ft(ac.pos.z) / 100) * 100;
+        const trend = ac.vs > 1 ? '↑' : ac.vs < -1 ? '↓' : '';
+        el.textContent = `${ac.callsign} ${altFt}${trend} ${Math.round(ms2kt(ac.ias))}kt`;
+        continue;
+      }
+
+      // 地面等待与落地滑跑不做方位标：它们就在场里，列表里看得到
+      if (ac.phase === 'GROUND' || ac.phase === 'LANDED') {
+        el.style.display = 'none';
+        continue;
+      }
+
+      // 相机空间方向 → 偏航/俯仰角，按"几个半视场"折算成屏幕坐标再夹到边缘
+      const rel = scratchNdc
+        .copy(scratchPos)
+        .sub(this.camera.position)
+        .transformDirection(this.camera.matrixWorldInverse);
+      const yaw = Math.atan2(rel.x, -rel.z);
+      const pitch = Math.asin(Math.min(1, Math.max(-1, rel.y)));
+      const cx = yaw / halfH;
+      const cy = pitch / halfV;
+      const k = Math.min(0.93 / Math.max(Math.abs(cx), Math.abs(cy)), 1);
+      el.className = `${base} label-edge`;
+      el.style.display = 'block';
+      el.style.left = `${((cx * k + 1) / 2) * w}px`;
+      el.style.top = `${((1 - cy * k) / 2) * h}px`;
+      el.style.setProperty('--a', `${rad2deg(Math.atan2(cx, cy))}deg`);
+      el.textContent = `${ac.callsign} ${Math.round(m2nm(Math.hypot(ac.pos.x, ac.pos.y)))}NM`;
     }
   }
 

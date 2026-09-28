@@ -13,7 +13,7 @@ import { createWeather, updateWeather, inStorm, type WeatherState } from './weat
 import { capacityFor, createScoreState, penalize, PENALTY, ratesFor, scoreDeparture, scoreLanding, type ScoreState } from './score';
 import { createTrafficState, makeRng, spawnArrival, spawnDeparture, updateTraffic, type TrafficState } from './traffic';
 import { angleDiff, ft2m, m2nm } from './units';
-import { hdist3 } from './vec';
+import { hdist3, headingToVec } from './vec';
 
 /** 逻辑步长频率 */
 export const TICK_RATE = 20;
@@ -163,11 +163,57 @@ export function selectedAircraft(world: World): Aircraft | null {
   return findAircraft(world, world.selectedId) ?? null;
 }
 
+/** 跑道占用判定的侧向余量与两端外延（米） */
+const RWY_SIDE = 150;
+const RWY_BEFORE = 400;
+const RWY_AFTER = 250;
+
+/**
+ * 该跑道（含反向，同一块道面）此刻是否被别的飞机占着：
+ * 地面等待、起飞滑跑、落地滑跑都算占用。返回占用的那架，干净则 null。
+ *
+ * 这是"往占用的跑道上落地"唯一的反馈手段 —— 不驳回的话玩家只能靠红牌
+ * 知道自己干了什么，而那张红牌来自他此刻根本无法控制的间隔判定。
+ */
+export function runwayOccupant(world: World, ident: string, exceptId: number): Aircraft | null {
+  const rw = findRunway(world.airport, ident);
+  if (!rw) return null;
+  const u = headingToVec(rw.heading);
+  for (const other of world.aircraft) {
+    if (other.id === exceptId) continue;
+    if (other.phase !== 'GROUND' && other.phase !== 'TAKEOFF' && other.phase !== 'LANDED') continue;
+    const dx = other.pos.x - rw.threshold.x;
+    const dy = other.pos.y - rw.threshold.y;
+    const axial = dx * u.x + dy * u.y;
+    if (axial < -RWY_BEFORE || axial > rw.length + RWY_AFTER) continue;
+    if (Math.abs(dx * -u.y + dy * u.x) > rw.width / 2 + RWY_SIDE) continue;
+    return other;
+  }
+  return null;
+}
+
 /** 给指定飞机下指令 */
 export function commandAircraft(world: World, id: number, cmd: Command): boolean {
   const ac = findAircraft(world, id);
   if (!ac) return false;
   if (ac.phase === 'LANDED') return false;
+
+  // 跑道占用互锁：立即驳回（不进复诵队列），不扣分，只在电台里说明原因
+  if (cmd.kind === 'clearedApproach' || cmd.kind === 'takeoff') {
+    const ident = cmd.kind === 'clearedApproach' ? cmd.runway : nearestRunwayIdent(world.airport, ac);
+    if (ident) {
+      const occ = runwayOccupant(world, ident, ac.id);
+      if (occ) {
+        pushLog(
+          world,
+          `[${stationOf(ac)}]>[${ac.callsign}] 跑道${ident}上有${occ.callsign}，${cmd.kind === 'takeoff' ? '暂不起飞' : '暂不落地许可'}`,
+          'atc',
+        );
+        return false;
+      }
+    }
+  }
+
   issueCommand(ac, cmd, world.time);
   ac.hasBeenControlled = true;
   pushLog(world, `[${stationOf(ac)}]>[${ac.callsign}] ${describeCommand(cmd)}`, 'atc');
@@ -327,8 +373,8 @@ function pruneAircraft(world: World): void {
   }
 }
 
-/** 找飞机实际落地的跑道（按距离与航向匹配） */
-function nearestRunwayIdent(airport: Airport, ac: Aircraft): string | null {
+/** 找飞机实际所在/落地的跑道（按距离与航向匹配） */
+export function nearestRunwayIdent(airport: Airport, ac: Aircraft): string | null {
   let best: string | null = null;
   let bestScore = Infinity;
   for (const r of airport.runways) {

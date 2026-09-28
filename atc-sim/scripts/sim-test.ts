@@ -9,7 +9,7 @@ import { AIRPORT } from '../src/data/airports/aurora';
 import { createAircraft } from '../src/sim/aircraft';
 import { spawnArrival, spawnDeparture } from '../src/sim/traffic';
 import { canClearApproach } from '../src/ui/commands';
-import { createWorld, stepWorld, commandAircraft, worldStats, stationOf } from '../src/sim/world';
+import { createWorld, stepWorld, commandAircraft, worldStats, stationOf, runwayOccupant } from '../src/sim/world';
 import { angleDiff, ft2m, kt2ms, m2ft, m2nm, ms2kt, nm2m, norm360 } from '../src/sim/units';
 import { headingToVec } from '../src/sim/vec';
 
@@ -99,6 +99,7 @@ console.log('\n[3] 高度与速度指令');
 console.log('\n[4] ILS 进近与落地');
 {
   const w = createWorld({ airport: AIRPORT, seed: 31 });
+  w.aircraft.length = 0; // 隔离：预置的跑道外等待机会触发占用互锁
   const rw = AIRPORT.runways[0]; // 18L
   // 放在跑道入口正北 18 NM、下滑道略上方
   const ac = createAircraft(
@@ -119,6 +120,7 @@ console.log('\n[4] ILS 进近与落地');
 
   // 单独验证：未清进近时不应自己落地
   const w2 = createWorld({ airport: AIRPORT, seed: 32 });
+  w2.aircraft.length = 0;
   const ac2 = createAircraft(
     {
       id: 921,
@@ -138,6 +140,7 @@ console.log('\n[4] ILS 进近与落地');
 console.log('\n[5] 复飞');
 {
   const w = createWorld({ airport: AIRPORT, seed: 41 });
+  w.aircraft.length = 0; // 隔离：预置等待机会把 18L 的落地许可驳掉
   const rw = AIRPORT.runways[0];
   const ac = createAircraft(
     {
@@ -153,6 +156,7 @@ console.log('\n[5] 复飞');
   w.aircraft.push(ac);
   commandAircraft(w, 930, { kind: 'clearedApproach', runway: rw.ident });
   advance(60, w);
+  check('复飞前先真的建立进近', ac.phase === 'APPROACH', ac.phase);
   const altBefore = ac.pos.z;
   commandAircraft(w, 930, { kind: 'goAround' });
   advance(90, w);
@@ -201,6 +205,7 @@ console.log('\n[7] 等待航线');
 console.log('\n[8] 起飞与离场');
 {
   const w = createWorld({ airport: AIRPORT, seed: 71 });
+  w.aircraft.length = 0; // 隔离：同跑道上的预置等待机会驳掉起飞许可
   const rw = AIRPORT.runways[0];
   const ac = createAircraft(
     {
@@ -284,7 +289,7 @@ console.log('\n[10] 起飞滑跑保持跑道航向');
 // 链路级断言：上面各组只测部件，这三组测"主玩法能不能真的跑通"
 // ---------------------------------------------------------------------------
 
-console.log('\n[14] 冲突分域与罚则减负');
+console.log('\n[11] 冲突分域与罚则减负');
 {
   const w = createWorld({ airport: AIRPORT, seed: 104 });
   w.aircraft.length = 0;
@@ -309,7 +314,7 @@ console.log('\n[14] 冲突分域与罚则减负');
   check('席位只剩塔台（进近席位已并入）', arr !== undefined && stationOf(arr) === 'TWR');
 }
 
-console.log('\n[11] 航路推进（回归：绕点死循环）');
+console.log('\n[12] 航路推进（回归：绕点死循环）');
 {
   const w = createWorld({ airport: AIRPORT, seed: 101 });
   w.aircraft.length = 0;
@@ -324,14 +329,34 @@ console.log('\n[11] 航路推进（回归：绕点死循环）');
   }
 }
 
-console.log('\n[12] 交通生成不被开局预置名额卡死');
+console.log('\n[13] 交通生成不被开局预置名额卡死');
 {
   const w = createWorld({ airport: AIRPORT, seed: 102 });
   advance(720, w);
   check('无人干预 12 分钟内有新航班生成', w.traffic.spawned > 0, `${w.traffic.spawned} 架`);
 }
 
-console.log('\n[13] 指令条门控 + 端到端落地链路');
+console.log('\n[14] 跑道占用互锁');
+{
+  const w = createWorld({ airport: AIRPORT, seed: 107 });
+  w.aircraft.length = 0;
+  const dep = spawnDeparture(1000, AIRPORT, '18L', 'AURORA1D', 0, w.rand);
+  const arr = spawnArrival(1001, AIRPORT, 'AURORA1A', 0, w.rand);
+  if (dep && arr) {
+    w.aircraft.push(dep, arr);
+    const ok18L = commandAircraft(w, arr.id, { kind: 'clearedApproach', runway: '18L' });
+    check('跑道上有等待机时驳回落地许可', ok18L === false && arr.approach === null, `commandAircraft=${ok18L}`);
+    check('驳回不扣分不亮牌', w.score.score === 0 && w.score.red === 0 && w.score.yellow === 0, `分数 ${w.score.score}`);
+    check('驳回会说明原因', w.log.some((l) => l.text.includes('跑道18L上有') && l.text.includes(dep.callsign)));
+    check('平行跑道不受影响', commandAircraft(w, arr.id, { kind: 'clearedApproach', runway: '18R' }));
+    commandAircraft(w, dep.id, { kind: 'takeoff' });
+    advance(60, w);
+    const occ = runwayOccupant(w, '18L', arr.id);
+    check('占用者滑出后跑道解除占用', occ === null, dep.phase);
+  }
+}
+
+console.log('\n[15] 指令条门控 + 端到端落地链路');
 {
   const w = createWorld({ airport: AIRPORT, seed: 103 });
   w.aircraft.length = 0;

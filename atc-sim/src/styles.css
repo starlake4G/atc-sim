@@ -149,6 +149,21 @@ body {
   color: var(--danger);
 }
 
+/* 出画方位标：贴在舞台边缘，箭头指向"该往哪儿转镜头" */
+.label-edge {
+  transform: translate(-50%, -50%);
+  border-style: dashed;
+  background: rgba(4, 8, 10, 0.78);
+}
+
+.label-edge::before {
+  content: '▲';
+  display: inline-block;
+  margin-right: 3px;
+  font-size: 9px;
+  transform: rotate(var(--a, 0deg));
+}
+
 .side {
   position: absolute;
   top: 48px;
@@ -402,6 +417,18 @@ body {
 .btn.btn-ils:hover {
   border-color: #8ec5e0;
   color: #cfeaf7;
+}
+
+/* 跑道被占：按钮仍可点（点了会在电台里听到驳回原因），但一眼看得出来 */
+.btn.btn-busy {
+  border-color: #6b2a29;
+  color: #d08a86;
+  background: rgba(226, 75, 74, 0.08);
+}
+
+.btn.btn-busy:hover {
+  border-color: var(--danger);
+  color: #f0b5b1;
 }
 
 .cbar-input {

@@ -10,7 +10,7 @@
 
 import type { Aircraft, Command } from '../sim/types';
 import type { World } from '../sim/world';
-import { commandAircraft, selectedAircraft, stationOf } from '../sim/world';
+import { commandAircraft, selectedAircraft, stationOf, runwayOccupant, nearestRunwayIdent } from '../sim/world';
 import { ft2m, kt2ms, m2ft, ms2kt, norm360 } from '../sim/units';
 import { WAKE_LABEL } from '../sim/types';
 import { reciprocalIdent } from '../sim/airport';
@@ -154,6 +154,7 @@ export class CommandBar {
     this.root.style.display = 'flex';
 
     const established = ac.approach?.slopeCaptured ?? false;
+    const busy = this.busyRunways(ac);
     this.callsignEl.textContent = ac.callsign;
     this.metaEl.textContent = `${ac.type} · ${WAKE_LABEL[ac.wake]} · ${ac.isDeparture ? '离场' : '进场'} · [${stationOf(ac)}]`;
     this.phaseEl.textContent = PHASE_LABEL[ac.phase] ?? ac.phase;
@@ -167,16 +168,30 @@ export class CommandBar {
       `高度 ${altFt} → ${tgtAlt} · 速度 ${spdKt} → ${tgtSpd} kt · 航向 ${hdg}` +
       (ac.lastInstruction ? `　« ${ac.lastInstruction}` : '');
 
-    const key = `${ac.id}:${ac.phase}:${established}`;
+    const key = `${ac.id}:${ac.phase}:${established}:${[...busy].sort().join(',')}`;
     if (key !== this.builtKey) {
       this.builtKey = key;
-      this.rebuildGroups(ac, established);
+      this.rebuildGroups(ac, established, busy);
     }
+  }
+
+  /**
+   * 此刻被别的飞机占着的跑道（含反向）。
+   * 指令条要把它标出来 —— 互锁只驳回不给提示，玩家就只能挨个试。
+   */
+  private busyRunways(ac: Aircraft): Set<string> {
+    const busy = new Set<string>();
+    for (const rw of this.world.airport.runways) {
+      for (const ident of [rw.ident, reciprocalIdent(rw.ident)]) {
+        if (runwayOccupant(this.world, ident, ac.id)) busy.add(ident);
+      }
+    }
+    return busy;
   }
 
   // ---------------------------------------------------------------- 指令组
 
-  private rebuildGroups(ac: Aircraft, established: boolean): void {
+  private rebuildGroups(ac: Aircraft, established: boolean, busy: Set<string>): void {
     const g = this.groupsEl;
     g.innerHTML = '';
 
@@ -195,7 +210,13 @@ export class CommandBar {
     }
 
     if (ac.phase === 'GROUND') {
-      g.append(this.group('起飞', [{ text: '可以起飞', act: 'takeoff', cls: 'ok' }]));
+      const ident = nearestRunwayIdent(this.world.airport, ac);
+      const blocked = ident !== null && busy.has(ident);
+      g.append(
+        this.group('起飞', [
+          { text: blocked ? `等待（${ident}占用）` : '可以起飞', act: 'takeoff', cls: blocked ? 'busy' : 'ok' },
+        ]),
+      );
       return;
     }
 
@@ -207,7 +228,8 @@ export class CommandBar {
       // 两个方向都可清：跑道构型随风向变
       for (const rw of this.world.airport.runways) {
         for (const ident of [rw.ident, reciprocalIdent(rw.ident)]) {
-          btns.push({ text: `ILS ${ident}`, act: 'ils', value: ident, cls: 'ils' });
+          const occ = busy.has(ident);
+          btns.push({ text: occ ? `ILS ${ident}·占` : `ILS ${ident}`, act: 'ils', value: ident, cls: occ ? 'busy' : 'ils' });
         }
       }
       btns.push({ text: '复飞', act: 'goaround', cls: 'warn' });
