@@ -1,6 +1,6 @@
 # AGENTS.md — Aurora Approach 工作区说明
 
-浏览器端机场管制模拟游戏「Aurora Approach」（2D 雷达 + 3D 塔台/跟机视角）。工作区根目录**不是 git 仓库**。
+浏览器端机场管制模拟游戏「Aurora Approach」（2D 雷达 + 3D 塔台/跟机视角）。工作区根目录**是 git 仓库**（2026-09-28 初始化，`main` 分支）；`refs/`、`node_modules/`、`dist/`、`.workbuddy/` 已在 `.gitignore` 中排除。
 
 ## 目录结构
 
@@ -18,7 +18,7 @@ npm run build       # tsc --noEmit && vite build
 npm run dev         # Vite 开发服务器，端口 5173
 ```
 
-- 无 lint。Sim Core 测试：`npm run sim:test`（`scripts/sim-test.ts`，20 项断言，tsx 运行）——**改动 Sim Core 后必须重跑**。
+- 无 lint。Sim Core 测试：`npm run sim:test`（`scripts/sim-test.ts`，30 项断言，tsx 运行）——**改动 Sim Core 后必须重跑**。断言分两层：部件级 + 链路级（航路推进 / 交通能生成 / 走 UI 门控判据能完成一次落地），改主玩法时不要只跑部件级。
 - `node_modules` 已安装。
 
 ## 架构红线（违反必返工）
@@ -46,7 +46,9 @@ npm run dev         # Vite 开发服务器，端口 5173
 
 ## 当前状态与已知坑（以 plan 文档 §8–§10 为准，此处为 2026-09-28 快照）
 
-- 里程碑 **M0–M3 全部完成**：进离场混合场景可完整运行（STAR 进场 → 雷达引导 → ILS 落地；跑道外等待 → 可以起飞 → SID → 出界移交）。
-- 验证：`npm run typecheck`、`npm run build`、`npm run sim:test`（20 项断言）全部通过。
+- 里程碑 **M0–M3 完成**（2026-09-28 复验并修复后才真正成立）：进离场混合场景可完整运行（STAR 进场 → 雷达引导 → ILS 落地；跑道外等待 → 可以起飞 → SID → 出界移交）。
+- 验证：`npm run typecheck`、`npm run build`、`npm run sim:test`（30 项断言）全部通过；浏览器实测指令条 ILS 门控与一次完整落地通过。
+- **2026-09-28 P0 链路修复**：合并基干（原 atc-sim2）里 `steerRoute` 存在绕点死循环（航路永不推进 → 无飞机进场 → 交通生成卡死）、指令条 ILS 门控自锁（`phase===APPROACH` 才出按钮，而该阶段要靠这条许可进入）、进近剖面追不上只能冲过跑道头 三处问题，详见 plan §10。**教训：部件级断言全过不代表玩法跑得通，链路级断言必须留。**
+- **下一个阻断项**：冲突探测不排除 `GROUND` 阶段飞机 —— 两架跑道外等待的航班会互判"失去间隔"，实测开局 20 分钟即 6 张红牌、分数 −76。做 P2 之前要先按 phase 分域（空中间隔 / 跑道占用分开）。
 - 已完成**对标《机场管制27》的 P0（交互与演出）与 P1（3D 表现层：昼夜循环/场内灯光/航站楼机坪）**（见 `docs/ATC-AC27-BENCHMARK.md` 与 plan §9）。**下一步是 P2（地面管制域：滑行道图数据、推出/滑行路线/穿越跑道）**。sim 层目前仍无地面滑行玩法。
 - 已知简化：进近引导比例控制、冲突检测 O(n²)、机型性能表为估算值 —— 见 plan 文档 §10。
