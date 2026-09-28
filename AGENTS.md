@@ -1,0 +1,52 @@
+# AGENTS.md — Aurora Approach 工作区说明
+
+浏览器端机场管制模拟游戏「Aurora Approach」（2D 雷达 + 3D 塔台/跟机视角）。工作区根目录**不是 git 仓库**。
+
+## 目录结构
+
+- `atc-sim/` — 主项目，唯一代码位置（2026-09-28 已合并：以原 atc-sim2 为基干，旧实现与 atc-sim2 目录已删除）。TypeScript + Vite + Three.js（three 0.186 / vite 8 / TS 7）。
+- `docs/ATC-SIM-PLAN.md` — **总方案与进度文档，动手前必读**：架构、关键参数表（§5）、里程碑（§7）、当前进度（§8）、剩余工作（§9）、已知风险（§10）。它是活文档，完成工作后要同步更新 §8。
+- `docs/ATC-COMPETITOR-SCAN.md` — 竞品调研，差异化定位的依据。
+- `docs/ATC-AC27-BENCHMARK.md` — 对标《机场管制27》的深度拆解（基于 refs/ 两段官方视频）与 P0–P3 路线，**当前工作以此为准**。
+- `refs/bluesky`（Python）、`refs/vice`（Go）— 只读参考仓库，**不参与构建、不要改动、不要全量扫描**（合计约 2 GB）。仿真常量多取自 BlueSky；plan 文档中标注 `BS` 的参数来源即此，调参前可去 `refs/bluesky` 查原始实现。
+
+## 常用命令（必须在 `atc-sim/` 下执行）
+
+```bash
+npm run typecheck   # tsc --noEmit，当前通过，改完必须保持通过
+npm run build       # tsc --noEmit && vite build
+npm run dev         # Vite 开发服务器，端口 5173
+```
+
+- 无 lint。Sim Core 测试：`npm run sim:test`（`scripts/sim-test.ts`，20 项断言，tsx 运行）——**改动 Sim Core 后必须重跑**。
+- `node_modules` 已安装。
+
+## 架构红线（违反必返工）
+
+分层自上而下：View Layer（RadarView 2D / SceneView 3D / ViewHost，可插拔）← Command/Input ← World Model（唯一真值源）← Sim Core（`src/sim/`，纯逻辑）。
+
+1. **Sim Core 禁止 `import three`** —— 必须保持可单测、可无头运行
+2. **视图只读快照**，绝不回写世界状态
+3. **定步长 + 累积器**：逻辑固定 20 Hz，渲染自由帧率；时间倍速只改 tick 累积量
+4. **内部一律 SI**（米、米每秒、秒）：英尺/节/海里只在显示层经 `src/sim/units.ts` 转换，绝不进入仿真内部
+5. **View 接口固定**：`mount(container)` / `update(snapshot, dt)` / `unmount()`
+
+## 坐标与单位约定
+
+- 局部 ENU 平面，原点 = 机场中心，忽略地球曲率：`x`=东、`y`=北、`z`=高度（米）
+- 航向：度，0 = 正北，顺时针增加；角度归一用 `units.ts` 的 `norm360` / `angleDiff`，不要手写
+- 风向为**来向**（气象惯例），去向 = 风向 + 180°；地速向量 = 空速向量 + 风向量
+
+## 约定与风格
+
+- 代码注释、文档、UI 文案均为中文（zh-CN）。
+- TS strict + `noUnusedLocals` + `noUnusedParameters` —— 未使用的变量/参数会直接挂 typecheck。
+- plan 文档 §0 的设计决策已冻结，不要重新讨论：中等拟真（只约束变化率，不做气动）、无货币化进度、鼠标键盘优先（语音非核心机制）、浏览器零安装、做到 M3 为止。
+- 新模块按 plan 文档 §9 的依赖顺序落地（机场数据 → traffic/score/world → 最小渲染 → 完整雷达屏 → 3D）。
+
+## 当前状态与已知坑（以 plan 文档 §8–§10 为准，此处为 2026-09-28 快照）
+
+- 里程碑 **M0–M3 全部完成**：进离场混合场景可完整运行（STAR 进场 → 雷达引导 → ILS 落地；跑道外等待 → 可以起飞 → SID → 出界移交）。
+- 验证：`npm run typecheck`、`npm run build`、`npm run sim:test`（20 项断言）全部通过。
+- 已完成**对标《机场管制27》的 P0（交互与演出）与 P1（3D 表现层：昼夜循环/场内灯光/航站楼机坪）**（见 `docs/ATC-AC27-BENCHMARK.md` 与 plan §9）。**下一步是 P2（地面管制域：滑行道图数据、推出/滑行路线/穿越跑道）**。sim 层目前仍无地面滑行玩法。
+- 已知简化：进近引导比例控制、冲突检测 O(n²)、机型性能表为估算值 —— 见 plan 文档 §10。
