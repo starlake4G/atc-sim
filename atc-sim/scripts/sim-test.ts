@@ -1,472 +1,173 @@
-/**
- * Sim Core 无头冒烟测试
- *
- * 不依赖浏览器，直接以固定步长驱动世界，验证运动学 / 指令 / 进近 / 冲突
- * 的真实行为。跑法见 package.json 的 `npm run sim:test`。
- */
+import { AIRPORTS } from "../src/data/airports";
+import { buildAirport, findTaxiPath } from "../src/sim/airport";
+import { botTick } from "../src/sim/bot";
+import { makeRoute } from "../src/sim/route";
+import { World, TICK } from "../src/sim/world";
+import { getLevel, LEVELS } from "../src/data/levels";
+import { kt as ktRaw, nm, toKt } from "../src/sim/units";
+import { dist } from "../src/sim/vec";
 
-import { AIRPORT } from '../src/data/airports/aurora';
-import { createAircraft } from '../src/sim/aircraft';
-import { spawnArrival, spawnDeparture } from '../src/sim/traffic';
-import { canClearApproach } from '../src/ui/commands';
-import { capacityFor, createScoreState, penalize, ratesFor, scoreLanding } from '../src/sim/score';
-import { createWorld, stepWorld, commandAircraft, worldStats, stationOf, runwayOccupant } from '../src/sim/world';
-import { angleDiff, ft2m, kt2ms, m2ft, m2nm, ms2kt, nm2m, norm360 } from '../src/sim/units';
-import { headingToVec } from '../src/sim/vec';
+let pass = 0;
+const failures: string[] = [];
 
-const DT = 1 / 20;
-
-let failures = 0;
-
-function check(label: string, cond: boolean, detail = ''): void {
-  if (cond) {
-    console.log(`  PASS  ${label}${detail ? `  (${detail})` : ''}`);
-  } else {
-    failures++;
-    console.log(`  FAIL  ${label}${detail ? `  (${detail})` : ''}`);
-  }
-}
-
-function advance(seconds: number, w: ReturnType<typeof createWorld>): void {
-  const steps = Math.round(seconds / DT);
-  for (let i = 0; i < steps; i++) stepWorld(w, DT);
-}
-
-function inject(
-  w: ReturnType<typeof createWorld>,
-  o: { id: number; x: number; y: number; zFt: number; heading: number; iasKt: number },
-) {
-  const ac = createAircraft(
-    {
-      id: o.id,
-      callsign: `TEST${o.id}`,
-      type: 'A320',
-      pos: { x: o.x, y: o.y, z: ft2m(o.zFt) },
-      heading: o.heading,
-      ias: kt2ms(o.iasKt),
-    },
-    0,
-  );
-  w.aircraft.push(ac);
-  return ac;
-}
-
-// ---------------------------------------------------------------------------
-
-console.log('\n[1] 世界推进与定步长');
-{
-  const w = createWorld({ airport: AIRPORT, seed: 7, storm: false });
-  advance(120, w);
-  check('时间按真实秒推进', Math.abs(w.time - 120) < 0.1, `t=${w.time.toFixed(2)}s`);
-  check('交通能自动生成', w.aircraft.length > 0, `${w.aircraft.length} 架`);
-  const allFinite = w.aircraft.every(
-    (a) => Number.isFinite(a.pos.x) && Number.isFinite(a.pos.y) && Number.isFinite(a.pos.z),
-  );
-  check('位置数值有限（无 NaN）', allFinite);
-}
-
-console.log('\n[2] 航向指令与转弯惯性');
-{
-  const w = createWorld({ airport: AIRPORT, seed: 11 });
-  const ac = inject(w, { id: 900, x: -20000, y: 30000, zFt: 10000, heading: 180, iasKt: 250 });
-  commandAircraft(w, 900, { kind: 'heading', value: 90 });
-  advance(90, w);
-  const diff = Math.abs(angleDiff(ac.heading, 90));
-  check('转向指令生效', diff < 5, `heading=${ac.heading.toFixed(1)}°`);
-
-  // 转弯必须是渐进的：短时间内不可能转完 90°
-  const w2 = createWorld({ airport: AIRPORT, seed: 12 });
-  const ac2 = inject(w2, { id: 901, x: -20000, y: 30000, zFt: 10000, heading: 180, iasKt: 250 });
-  commandAircraft(w2, 901, { kind: 'heading', value: 90 });
-  advance(6, w2);
-  check('转弯有惯性（非瞬转）', Math.abs(angleDiff(ac2.heading, 180)) < 60, `6s 后 ${ac2.heading.toFixed(1)}°`);
-}
-
-console.log('\n[3] 高度与速度指令');
-{
-  const w = createWorld({ airport: AIRPORT, seed: 21 });
-  const ac = inject(w, { id: 910, x: -20000, y: 30000, zFt: 10000, heading: 180, iasKt: 250 });
-  commandAircraft(w, 910, { kind: 'altitude', value: ft2m(6000) });
-  advance(180, w);
-  const errFt = Math.abs(m2ft(ac.pos.z) - 6000);
-  check('下降并稳住在目标高度', errFt < 100, `误差 ${errFt.toFixed(0)} ft`);
-
-  commandAircraft(w, 910, { kind: 'speed', value: kt2ms(200) });
-  advance(120, w);
-  const errKt = Math.abs(ac.ias / 0.514444 - 200);
-  check('减速指令生效', errKt < 8, `误差 ${errKt.toFixed(1)} kt`);
-}
-
-console.log('\n[4] ILS 进近与落地');
-{
-  const w = createWorld({ airport: AIRPORT, seed: 31 });
-  w.aircraft.length = 0; // 隔离：预置的跑道外等待机会触发占用互锁
-  const rw = AIRPORT.runways[0]; // 18L
-  // 放在跑道入口正北 18 NM、下滑道略上方
-  const ac = createAircraft(
-    {
-      id: 920,
-      callsign: 'TEST920',
-      type: 'A320',
-      pos: { x: rw.threshold.x, y: rw.threshold.y + 18 * 1852, z: ft2m(6000) },
-      heading: 180,
-      ias: kt2ms(180),
-    },
-    0,
-  );
-  w.aircraft.push(ac);
-  commandAircraft(w, 920, { kind: 'clearedApproach', runway: rw.ident });
-  advance(600, w);
-  check('清进近后能截获并落地', ac.phase === 'LANDED', `phase=${ac.phase}`);
-
-  // 单独验证：未清进近时不应自己落地
-  const w2 = createWorld({ airport: AIRPORT, seed: 32 });
-  w2.aircraft.length = 0;
-  const ac2 = createAircraft(
-    {
-      id: 921,
-      callsign: 'TEST921',
-      type: 'A320',
-      pos: { x: rw.threshold.x, y: rw.threshold.y + 18 * 1852, z: ft2m(6000) },
-      heading: 180,
-      ias: kt2ms(180),
-    },
-    0,
-  );
-  w2.aircraft.push(ac2);
-  advance(300, w2);
-  check('未清进近不会自动落地', ac2.phase !== 'LANDED', `phase=${ac2.phase}`);
-}
-
-console.log('\n[5] 复飞');
-{
-  const w = createWorld({ airport: AIRPORT, seed: 41 });
-  w.aircraft.length = 0; // 隔离：预置等待机会把 18L 的落地许可驳掉
-  const rw = AIRPORT.runways[0];
-  const ac = createAircraft(
-    {
-      id: 930,
-      callsign: 'TEST930',
-      type: 'A320',
-      pos: { x: rw.threshold.x, y: rw.threshold.y + 8 * 1852, z: ft2m(3000) },
-      heading: 180,
-      ias: kt2ms(160),
-    },
-    0,
-  );
-  w.aircraft.push(ac);
-  commandAircraft(w, 930, { kind: 'clearedApproach', runway: rw.ident });
-  advance(60, w);
-  check('复飞前先真的建立进近', ac.phase === 'APPROACH', ac.phase);
-  const altBefore = ac.pos.z;
-  commandAircraft(w, 930, { kind: 'goAround' });
-  advance(90, w);
-  check('复飞后开始爬升', ac.pos.z > altBefore + 100, `+${(ac.pos.z - altBefore).toFixed(0)} m`);
-}
-
-console.log('\n[6] 冲突探测');
-{
-  const w = createWorld({ airport: AIRPORT, seed: 51 });
-  // 两架对头飞，同高度
-  inject(w, { id: 940, x: -30000, y: 0, zFt: 20000, heading: 90, iasKt: 300 });
-  inject(w, { id: 941, x: 30000, y: 0, zFt: 20000, heading: 270, iasKt: 300 });
-  advance(20, w);
-  check('远距离时能预测到冲突', w.conflicts.length > 0, `${w.conflicts.length} 对`);
-
-  const far = createWorld({ airport: AIRPORT, seed: 52 });
-  inject(far, { id: 942, x: -30000, y: 0, zFt: 20000, heading: 90, iasKt: 300 });
-  inject(far, { id: 943, x: 30000, y: 0, zFt: 34000, heading: 270, iasKt: 300 });
-  advance(20, far);
-  check('垂直间隔足够时不报警', far.conflicts.length === 0, `${far.conflicts.length} 对`);
-}
-
-console.log('\n[7] 等待航线');
-{
-  const w = createWorld({ airport: AIRPORT, seed: 61 });
-  const wp = AIRPORT.waypoints.find((x) => x.name === 'BRAVO')!;
-  const ac = createAircraft(
-    {
-      id: 950,
-      callsign: 'TEST950',
-      type: 'A320',
-      pos: { x: wp.pos.x - 8000, y: wp.pos.y - 8000, z: ft2m(12000) },
-      heading: norm360(45),
-      ias: kt2ms(220),
-    },
-    0,
-  );
-  w.aircraft.push(ac);
-  commandAircraft(w, 950, { kind: 'hold', fix: 'BRAVO' });
-  advance(120, w);
-  const d = Math.hypot(ac.pos.x - wp.pos.x, ac.pos.y - wp.pos.y);
-  check('已进入等待航线', ac.holding?.entered === true, `距等待点 ${m2nm(d).toFixed(1)} NM`);
-  check('高度保持稳定', Math.abs(m2ft(ac.pos.z) - 12000) < 300, `${m2ft(ac.pos.z).toFixed(0)} ft`);
-}
-
-console.log('\n[8] 起飞与离场');
-{
-  const w = createWorld({ airport: AIRPORT, seed: 71 });
-  w.aircraft.length = 0; // 隔离：同跑道上的预置等待机会驳掉起飞许可
-  const rw = AIRPORT.runways[0];
-  const ac = createAircraft(
-    {
-      id: 960,
-      callsign: 'TEST960',
-      type: 'B738',
-      pos: { x: rw.threshold.x, y: rw.threshold.y, z: rw.elevation },
-      heading: rw.heading,
-      ias: 0,
-      isDeparture: true,
-      phase: 'GROUND',
-    },
-    0,
-  );
-  w.aircraft.push(ac);
-
-  advance(30, w);
-  check('未给许可时停在原地', ac.ias < 1, `ias=${(ac.ias / 0.514444).toFixed(1)} kt`);
-
-  commandAircraft(w, 960, { kind: 'takeoff' });
-  advance(240, w);
-  check('起飞许可后离地爬升', ac.pos.z > ft2m(1000), `${m2ft(ac.pos.z).toFixed(0)} ft`);
-}
-
-console.log('\n[9] 长时运行稳定性（30 分钟仿真，无人干预）');
-{
-  const w = createWorld({ airport: AIRPORT, seed: 99, storm: true });
-  const t0 = Date.now();
-  advance(1800, w);
-  const ms = Date.now() - t0;
-  const st = worldStats(w);
-
-  const finite = w.aircraft.every(
-    (a) =>
-      Number.isFinite(a.pos.x) &&
-      Number.isFinite(a.pos.y) &&
-      Number.isFinite(a.pos.z) &&
-      Number.isFinite(a.heading) &&
-      Number.isFinite(a.ias),
-  );
-  check('30 分钟后无 NaN', finite);
-  check(
-    '飞机数不失控',
-    w.aircraft.length <= st.capacity + 6,
-    `${w.aircraft.length} 架 / 容量 ${st.capacity}`,
-  );
-  check('仿真吞吐足够快', ms < 20000, `${ms}ms 跑完 1800s 仿真`);
-  check('日志未无限增长', w.log.length <= 120, `${w.log.length} 条`);
-  console.log(`        （分数 ${st.score}，冲突告警 ${st.conflicts} 对，容量 ${st.capacity}）`);
-}
-
-console.log('\n[10] 起飞滑跑保持跑道航向');
-{
-  const w = createWorld({ airport: AIRPORT, seed: 23, storm: false });
-  w.aircraft.length = 0; // 清掉预置交通，隔离被测飞机
-  const dep = spawnDeparture(950, AIRPORT, '18L', 'AURORA1D', 0, w.rand);
-  if (dep) {
-    w.aircraft.push(dep);
-    commandAircraft(w, 950, { kind: 'takeoff' });
-    advance(20, w);
-    check(
-      '滑跑阶段保持跑道航向',
-      Math.abs(angleDiff(dep.heading, 180)) < 5,
-      `20s 后 heading=${dep.heading.toFixed(1)}°`,
-    );
-    check(
-      '滑跑不偏离跑道中线（侧风不吹偏）',
-      Math.abs(dep.pos.x - (-380)) < 5,
-      `x=${dep.pos.x.toFixed(1)}m（18L 中线 x=-380）`,
-    );
-    advance(110, w);
-    check(
-      '升空爬升后转向 SID',
-      dep.phase === 'CLIMB' && Math.abs(angleDiff(dep.heading, 180)) > 15,
-      `phase=${dep.phase} heading=${dep.heading.toFixed(1)}°`,
-    );
-  }
-}
-
-// ---------------------------------------------------------------------------
-// 链路级断言：上面各组只测部件，这三组测"主玩法能不能真的跑通"
-// ---------------------------------------------------------------------------
-
-console.log('\n[11] 冲突分域与罚则减负');
-{
-  const w = createWorld({ airport: AIRPORT, seed: 104 });
-  w.aircraft.length = 0;
-  const d1 = spawnDeparture(990, AIRPORT, '18L', 'AURORA1D', 0, w.rand);
-  const d2 = spawnDeparture(991, AIRPORT, '18R', 'AURORA2D', 0, w.rand);
-  if (d1 && d2) {
-    w.aircraft.push(d1, d2);
-    advance(30, w);
-    check('两架跑道外等待机不再互判失去间隔', w.conflicts.length === 0 && w.score.red === 0, `${w.conflicts.length} 对 / 红牌 ${w.score.red}`);
-  }
-
-  const w2 = createWorld({ airport: AIRPORT, seed: 105 });
-  w2.aircraft.length = 0;
-  inject(w2, { id: 992, x: -40000, y: 0, zFt: 20000, heading: 90, iasKt: 300 });
-  inject(w2, { id: 993, x: 40000, y: 0, zFt: 20000, heading: 270, iasKt: 300 });
-  advance(60, w2);
-  check('预测级冲突仍然告警', w2.conflicts.some((c) => c.severity === 'PREDICTED'), `${w2.conflicts.length} 对`);
-  check('预测级冲突不扣分不亮牌', w2.score.score === 0 && w2.score.yellow === 0, `分数 ${w2.score.score}，黄牌 ${w2.score.yellow}`);
-
-  const w3 = createWorld({ airport: AIRPORT, seed: 106 });
-  const arr = w3.aircraft.find((a) => !a.isDeparture);
-  check('席位只剩塔台（进近席位已并入）', arr !== undefined && stationOf(arr) === 'TWR');
-}
-
-console.log('\n[12] 航路推进（回归：绕点死循环）');
-{
-  const w = createWorld({ airport: AIRPORT, seed: 101 });
-  w.aircraft.length = 0;
-  const arr = spawnArrival(970, AIRPORT, 'AURORA1A', 0, w.rand);
-  if (arr) {
-    w.aircraft.push(arr);
-    const d0 = Math.hypot(arr.pos.x, arr.pos.y);
-    advance(600, w);
-    const d1 = Math.hypot(arr.pos.x, arr.pos.y);
-    check('STAR 航路点能推进', arr.routeIndex > 0, `idx=${arr.routeIndex}/${arr.route.length}`);
-    check('沿航路向机场收敛（不绕点盘旋）', d1 < d0 - nm2m(15), `距场 ${m2nm(d0).toFixed(1)} → ${m2nm(d1).toFixed(1)} NM`);
-  }
-}
-
-console.log('\n[13] 交通生成不被开局预置名额卡死');
-{
-  const w = createWorld({ airport: AIRPORT, seed: 102 });
-  advance(720, w);
-  check('无人干预 12 分钟内有新航班生成', w.traffic.spawned > 0, `${w.traffic.spawned} 架`);
-}
-
-console.log('\n[14] 跑道占用互锁');
-{
-  const w = createWorld({ airport: AIRPORT, seed: 107 });
-  w.aircraft.length = 0;
-  const dep = spawnDeparture(1000, AIRPORT, '18L', 'AURORA1D', 0, w.rand);
-  const arr = spawnArrival(1001, AIRPORT, 'AURORA1A', 0, w.rand);
-  if (dep && arr) {
-    w.aircraft.push(dep, arr);
-    const ok18L = commandAircraft(w, arr.id, { kind: 'clearedApproach', runway: '18L' });
-    check('跑道上有等待机时驳回落地许可', ok18L === false && arr.approach === null, `commandAircraft=${ok18L}`);
-    check('驳回不扣分不亮牌', w.score.score === 0 && w.score.red === 0 && w.score.yellow === 0, `分数 ${w.score.score}`);
-    check('驳回会说明原因', w.log.some((l) => l.text.includes('跑道18L上有') && l.text.includes(dep.callsign)));
-    check('平行跑道不受影响', commandAircraft(w, arr.id, { kind: 'clearedApproach', runway: '18R' }));
-    commandAircraft(w, dep.id, { kind: 'takeoff' });
-    advance(60, w);
-    const occ = runwayOccupant(w, '18L', arr.id);
-    check('占用者滑出后跑道解除占用', occ === null, dep.phase);
-  }
-}
-
-console.log('\n[15] 指令条门控 + 端到端落地链路');
-{
-  const w = createWorld({ airport: AIRPORT, seed: 103 });
-  w.aircraft.length = 0;
-  const arr = spawnArrival(980, AIRPORT, 'AURORA1A', 0, w.rand);
-  const dep = spawnDeparture(981, AIRPORT, '18R', 'AURORA2D', 0, w.rand);
-  if (arr && dep) {
-    w.aircraft.push(arr, dep);
-    check('门控：空中进场机可给 ILS 许可', canClearApproach(arr));
-    check('门控：地面等待机不可给 ILS 许可', !canClearApproach(dep));
-
-    // 像玩家一样飞：先减速、再按 3° 剖面逐级降高，压到剖面附近清 ILS
-    const rw = AIRPORT.runways[0]; // 18L
-    const ALT_STEPS = [12000, 8000, 6000, 4000, 3000];
-    let cleared = false;
-    let clearedRunway = '';
-    let slowed = false;
-    const steps = Math.round((40 * 60) / DT);
-    for (let i = 0; i < steps && arr.phase !== 'LANDED'; i++) {
-      stepWorld(w, DT);
-      if (!canClearApproach(arr)) continue;
-      const altFt = m2ft(arr.pos.z);
-      // 以 18L 中心线延长线为基准：进近侧轴向距离 + 横向偏离（雷达屏上玩家就照这个判）
-      const u = headingToVec(rw.heading);
-      const axial = (arr.pos.x - rw.threshold.x) * u.x + (arr.pos.y - rw.threshold.y) * u.y;
-      const dNm = m2nm(Math.abs(axial));
-      const latNm = m2nm(Math.abs((arr.pos.x - rw.threshold.x) * -u.y + (arr.pos.y - rw.threshold.y) * u.x));
-      if (!cleared && axial < 0 && dNm < 18 && latNm < 2.5 && altFt < 6000) {
-        // 想落的跑道被等待机占着 —— 真实塔台的做法是先把它放出去，而不是换跑道硬塞
-        const occ = runwayOccupant(w, rw.ident, arr.id);
-        if (occ && occ.phase === 'GROUND') commandAircraft(w, occ.id, { kind: 'takeoff' });
-        cleared = commandAircraft(w, arr.id, { kind: 'clearedApproach', runway: rw.ident });
-        clearedRunway = rw.ident;
-      }
-      if (!slowed && ms2kt(arr.ias) > 210 && dNm < 45) {
-        commandAircraft(w, arr.id, { kind: 'speed', value: kt2ms(210) });
-        slowed = true;
-      }
-      // 清了进近就把垂直剖面交给下滑道，别再手压高度
-      if (cleared || arr.approach?.slopeCaptured) continue;
-      if (Math.abs(arr.pos.z - arr.intent.altitude) < 60) {
-        const want = Math.max(3000, dNm * 300);
-        const nextStep = ALT_STEPS.find((s) => s <= want) ?? ALT_STEPS[ALT_STEPS.length - 1];
-        if (nextStep < m2ft(arr.intent.altitude)) {
-          commandAircraft(w, arr.id, { kind: 'altitude', value: ft2m(nextStep) });
-        }
-      }
+function check(name: string, fn: () => boolean | string): void {
+  try {
+    const r = fn();
+    if (r === true) {
+      pass += 1;
+    } else {
+      failures.push(`${name}: ${r === false ? "断言为假" : r}`);
     }
-    check('玩家能在指令条上给出首次 ILS 许可', cleared, `t=${(w.time / 60).toFixed(1)}min`);
-    check(
-      '沿 STAR 进场的航班最终落地',
-      arr.phase === 'LANDED',
-      `phase=${arr.phase}，许可跑道 ${clearedRunway || '-'}，距场 ${m2nm(Math.hypot(arr.pos.x, arr.pos.y)).toFixed(1)} NM`,
-    );
+  } catch (e) {
+    failures.push(`${name}: 抛错 ${(e as Error).message}`);
   }
 }
 
-// ---------------------------------------------------------------------------
+check("机场数据：Kestrel 27 号跑道可构建", () => {
+  const idx = buildAirport(AIRPORTS.kestrel, "27");
+  return idx.runway.threshold.x === 1200 || "threshold 不对";
+});
 
-console.log('\n[16] 节奏与正反馈');
-{
-  check('容量 4 起步', capacityFor(0) === 4, `${capacityFor(0)} 架`);
-  const r = ratesFor(capacityFor(0));
-  check('流率够密（进场 ≥ 20 架/小时）', r.arrivals >= 20, `进 ${r.arrivals} / 离 ${r.departures} 架每小时`);
+check("机场数据：每个机位都能滑到跑道外等待点", () => {
+  const idx = buildAirport(AIRPORTS.kestrel, "27");
+  for (const s of idx.def.stands) {
+    const p = findTaxiPath(idx, s.node, idx.holdingNode);
+    if (!p) return `机位 ${s.id} 不可达`;
+  }
+  return true;
+});
 
-  const st = createScoreState();
-  const ac = createAircraft({ id: 1, callsign: 'TEST1', type: 'A320', pos: { x: 0, y: 0, z: 100 }, heading: 180, ias: 70 }, 0);
-  scoreLanding(st, ac, '18L', '18L', 0);
-  const first = st.score;
-  scoreLanding(st, ac, '18L', '18L', 1);
-  check('连续干净落地给连击加成', st.score - first > first, `首架 +${first}，次架 +${st.score - first}`);
-  penalize(st, ac, 'test-flag', 5, '测试扣分', 2);
-  check('吃牌连击归零', st.streak === 0);
-  scoreLanding(st, ac, '18L', '18L', 3);
-  check('连击重新从 1 开始', st.streak === 1);
-  check('扣分事件是中文', st.events.some((e) => e.reason === '测试扣分' && e.delta === -5));
+check("机场数据：每个脱离口都能滑回机位", () => {
+  const idx = buildAirport(AIRPORTS.kestrel, "27");
+  for (const ex of idx.runway.exits) {
+    const p = findTaxiPath(idx, ex.node, "ST1");
+    if (!p) return `脱离口 ${ex.name} 不可达`;
+  }
+  return true;
+});
 
-  // 离场机堆满两个入口的话，四个方向的落地许可会被占用互锁全部驳回
-  const w = createWorld({ airport: AIRPORT, seed: 109 });
-  advance(1800, w);
-  const waiting = w.aircraft.filter((a) => a.phase === 'GROUND').length;
-  check(
-    '无人干预 30 分钟后等待机不超过跑道数',
-    waiting <= w.airport.runways.length,
-    `${waiting} 架等待 / ${w.airport.runways.length} 条跑道，在场 ${w.aircraft.length}`,
-  );
+check("航路：直线折线能从起点走到终点", () => {
+  const r = makeRoute([
+    { x: 0, y: 0 },
+    { x: 1000, y: 0 },
+    { x: 1000, y: 1000 },
+  ]);
+  let s = r.follow({ x: 0, y: 0 }, 50);
+  for (let i = 0; i < 100 && !s.finished; i++) {
+    const p = { x: s.target.x, y: s.target.y };
+    s = r.follow(p, 50);
+  }
+  if (!s.finished) return "没有到达终点";
+  return Math.abs(r.total - 2000) < 1 || `总长 ${r.total}`;
+});
+
+check("航路：横向偏移不会导致绕圈（弧长单调）", () => {
+  const r = makeRoute([
+    { x: 0, y: 0 },
+    { x: 2000, y: 0 },
+  ]);
+  const a = r.follow({ x: 300, y: 200 }, 100);
+  const s1 = a.s;
+  const b = r.follow({ x: 200, y: -200 }, 100);
+  return b.s >= s1 - 13 || `s 回退：${s1} -> ${b.s}`;
+});
+
+check("关卡：全部关卡都能构建世界并跑通前 60 秒", () => {
+  for (const lvl of LEVELS) {
+    const w = new World(lvl);
+    for (let i = 0; i < 600; i++) w.step();
+    for (const ac of w.aircraftList()) {
+      if (!Number.isFinite(ac.pos.x) || !Number.isFinite(ac.altM)) return `${lvl.id} 出现 NaN`;
+    }
+  }
+  return true;
+});
+
+check("全流程：正常关卡能在机器人管制下完成多架次落地与起飞", () => {
+  const lvl = getLevel("morning-rush");
+  const w = new World(lvl);
+  const steps = Math.ceil((lvl.durationMin * 60) / TICK);
+  for (let i = 0; i < steps; i++) {
+    w.step();
+    if (i % 20 === 0) botTick(w);
+  }
+  const landed = w.score.landings;
+  const took = w.score.takeoffs;
+  if (landed < 3) return `落地只有 ${landed} 架`;
+  if (took < 2) return `起飞只有 ${took} 架`;
+  if (w.score.landings + w.score.takeoffs < 6) return `总架次只有 ${landed + took}`;
+  return true;
+});
+
+check("全流程：一架进场机能沿 STAR 进场、截获 ILS 并落地", () => {
+  const lvl = { ...getLevel("tutorial") };
+  const w = new World(lvl);
+  let landed = false;
+  for (let i = 0; i < 20 * 60 * 10 && !landed; i++) {
+    w.step();
+    if (i % 20 === 0) botTick(w);
+    landed = w.score.landings > 0;
+  }
+  return landed || "20 分钟内没有落地";
+});
+
+check("全流程：离场机能推出、滑行、起飞并移交", () => {
+  const lvl = { ...getLevel("tutorial"), flights: [{ callsign: "TST001", airline: "测试", typeId: "A320", kind: "dep" as const, atMin: 0, standId: "S2" }] };
+  const w = new World(lvl);
+  let took = false;
+  for (let i = 0; i < 15 * 60 * 10 && !took; i++) {
+    w.step();
+    if (i % 20 === 0) botTick(w);
+    took = w.score.takeoffs > 0;
+  }
+  return took || "15 分钟内没有起飞";
+});
+
+check("跑道互锁：跑道被占时落地许可被拒", () => {
+  const lvl = getLevel("morning-rush");
+  const w = new World(lvl);
+  for (let i = 0; i < 300; i++) w.step();
+  const ac = w.aircraftList()[0];
+  if (!ac) return "没有生成飞机";
+  w.occupyRunway(ac);
+  const res = w.issue(ac.id, { kind: "land" });
+  return res.ok === false || "应当被拒绝";
+});
+
+check("分离：两架飞机贴近时会被判为冲突", () => {
+  const lvl = getLevel("tutorial");
+  const w = new World(lvl);
+  for (let i = 0; i < 300; i++) w.step();
+  const list = w.aircraftList();
+  if (list.length < 1) return "没有飞机";
+  const a = list[0]!;
+  const b = { ...a, id: "fake", callsign: "FAKE1", pos: { x: a.pos.x + nm(1), y: a.pos.y }, altM: a.altM + 50 };
+  w.aircraft.set(b.id, b);
+  for (let i = 0; i < 20; i++) w.step();
+  return w.conflicts.length > 0 || "没有检测到冲突";
+});
+
+check("单位：速度换算往返一致", () => {
+  return Math.abs(toKt(ktRaw(1)) - 1) < 1e-9 || "换算不一致";
+});
+
+check("地面：所有飞机位置都在物理范围内（不出现地下/天上乱飞）", () => {
+  const lvl = getLevel("morning-rush");
+  const w = new World(lvl);
+  for (let i = 0; i < 4500; i++) {
+    w.step();
+    if (i % 20 === 0) botTick(w);
+    for (const ac of w.aircraftList()) {
+      if (ac.altM < -1) return `${ac.callsign} 高度为负`;
+      if (dist(ac.pos, { x: 0, y: 0 }) > 60000) return `${ac.callsign} 跑出 60km`;
+    }
+  }
+  return true;
+});
+
+console.log(`\n通过 ${pass} / ${pass + failures.length}`);
+if (failures.length > 0) {
+  console.log("失败：");
+  for (const f of failures) console.log("  - " + f);
+  process.exit(1);
 }
-
-console.log('\n[17] 加速下降真的更快');
-{
-  const w = createWorld({ airport: AIRPORT, seed: 108 });
-  w.aircraft.length = 0;
-  const ac = inject(w, { id: 1010, x: -20000, y: 20000, zFt: 16000, heading: 180, iasKt: 260 });
-  commandAircraft(w, 1010, { kind: 'altitude', value: ft2m(4000) });
-  advance(30, w);
-  const base = Math.abs(ac.vs);
-  commandAircraft(w, 1010, { kind: 'expedite' });
-  advance(20, w);
-  check('加速下降超过标准垂直率', Math.abs(ac.vs) > base * 1.15, `${base.toFixed(1)} → ${Math.abs(ac.vs).toFixed(1)} m/s`);
-  check('加速下降不改变目标高度', Math.abs(m2ft(ac.intent.altitude) - 4000) < 200, `${m2ft(ac.intent.altitude).toFixed(0)} ft`);
-  const t0 = w.time;
-  for (let i = 0; i < Math.round(360 / DT) && Math.abs(ac.intent.altitude - ac.pos.z) > ft2m(200); i++) stepWorld(w, DT);
-  check('接近改平时自动解除加速', ac.intent.expedite === false, `${(w.time - t0).toFixed(0)}s 后 alt=${m2ft(ac.pos.z).toFixed(0)} ft`);
-}
-
-// ---------------------------------------------------------------------------
-
-console.log(
-  failures === 0
-    ? '\n全部通过。\n'
-    : `\n${failures} 项失败。\n`,
-);
-process.exitCode = failures === 0 ? 0 : 1;

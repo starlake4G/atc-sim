@@ -2,30 +2,28 @@
   "name": "atc-sim",
   "private": true,
   "version": "0.1.0",
-  "description": "Aurora Approach — 浏览器端机场管制模拟器（2D 雷达 + 3D 塔台/跟机视角）",
   "type": "module",
   "scripts": {
     "dev": "vite",
     "build": "tsc --noEmit && vite build",
-    "preview": "vite preview",
     "typecheck": "tsc --noEmit",
-    "sim:test": "tsx scripts/sim-test.ts"
+    "sim:test": "tsx scripts/sim-test.ts",
+    "accept": "npm run typecheck && npm run sim:test",
+    "shot": "node scripts/shot.mjs"
   },
-  "keywords": [
-    "atc",
-    "air-traffic-control",
-    "simulation",
-    "threejs"
-  ],
-  "license": "MIT",
   "dependencies": {
+    "react": "^19.3.1",
+    "react-dom": "^19.3.1",
     "three": "^0.186.1"
   },
   "devDependencies": {
-    "@types/node": "^26.6.3",
+    "@types/react": "^19.3.0",
+    "@types/react-dom": "^19.3.0",
     "@types/three": "^0.186.0",
+    "@vitejs/plugin-react": "^6.1.2",
+    "puppeteer-core": "^25.14.0",
     "tsx": "^4.23.15",
     "typescript": "^7.0.2",
-    "vite": "^8.3.1"
+    "vite": "^8.3.4"
   }
 }

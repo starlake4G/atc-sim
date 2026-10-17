@@ -1,0 +1,25 @@
+import type { AirportIndex } from "./airport";
+import type { Aircraft, Seat } from "./types";
+
+/** aircraft.ts 需要的世界能力。world.ts 实现它，避免 sim 内部互相 import 成环。 */
+export interface SimEnv {
+  idx: AirportIndex;
+  time: number;
+  dt: number;
+  windDirDeg: number;
+  windKt: number;
+  runwayOccupantId: string | null;
+  aircraftList(): Aircraft[];
+  /** 无线电：管制员发话 */
+  say(seat: Seat, callsign: string, text: string): void;
+  /** 系统提示（不占无线电） */
+  notify(text: string, tone: "warn" | "danger"): void;
+  countLanding(ac: Aircraft): void;
+  countTakeoff(ac: Aircraft): void;
+  addViolation(ac: Aircraft, reason: string, points: number): void;
+  occupyRunway(ac: Aircraft): void;
+  vacateRunway(ac: Aircraft): void;
+  /** 找一张空闲机位给进场飞机 */
+  assignStand(ac: Aircraft): string | null;
+  finish(ac: Aircraft): void;
+}

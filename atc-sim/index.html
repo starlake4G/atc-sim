@@ -3,34 +3,19 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Aurora Approach — 机场管制模拟</title>
+    <title>Kestrel Approach</title>
+    <script>
+      window.addEventListener("error", function (e) {
+        var d = document.createElement("div");
+        d.style.cssText =
+          "position:fixed;bottom:0;left:0;right:0;background:#3a1414;color:#f7c1c1;font:12px monospace;padding:8px;z-index:9999";
+        d.textContent = "Error: " + e.message + " @ " + e.filename + ":" + e.lineno;
+        document.body.appendChild(d);
+      });
+    </script>
   </head>
   <body>
-    <div id="app"></div>
-    <script>
-      // 尽早注册全局错误捕获：模块加载期或渲染期的错误要能看见，而不是静默白屏
-      (function () {
-        function show(msg) {
-          var el = document.getElementById('fatal-error');
-          if (!el) {
-            el = document.createElement('div');
-            el.id = 'fatal-error';
-            el.style.cssText =
-              'position:fixed;bottom:0;left:0;right:0;background:#3a1414;color:#f7c1c1;' +
-              'font:12px ui-monospace,monospace;padding:8px 12px;z-index:9999;white-space:pre-wrap;' +
-              'border-top:1px solid #e24b4a;max-height:40%;overflow:auto';
-            document.body.appendChild(el);
-          }
-          el.textContent += msg + '\n';
-        }
-        window.addEventListener('error', function (e) {
-          show('运行错误: ' + (e.message || e.error) + '  @ ' + (e.filename || '') + ':' + (e.lineno || ''));
-        });
-        window.addEventListener('unhandledrejection', function (e) {
-          show('未处理的 Promise 拒绝: ' + (e.reason && e.reason.message ? e.reason.message : e.reason));
-        });
-      })();
-    </script>
-    <script type="module" src="/src/main.ts"></script>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
   </body>
 </html>

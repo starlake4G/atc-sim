@@ -1,504 +1,293 @@
-/**
- * 世界模型 —— 唯一真值源
- *
- * 定步长 20 Hz，渲染帧率与逻辑解耦；时间倍速只改变累积器的消耗速度。
- * 所有视图层从这里读快照，绝不回写。
- */
+import { getAirport } from "../data/airports";
+import { getType } from "../data/aircraft-types";
+import { buildAirport, distanceToThreshold, type AirportIndex } from "./airport";
+import { isAirborne, spawnArrival, spawnDeparture, stepAircraft } from "./aircraft";
+import { availableCommands, executeCommand, readbackText, seatOf } from "./commands";
+import type { SimEnv } from "./env";
+import { Rng } from "./rng";
+import type { Aircraft, Command, CommandOption, CommandResult, LevelDef, RadioLine, SimState } from "./types";
+import { dist } from "./vec";
+import { ft, nm } from "./units";
 
-import type { Airport, Aircraft, Command, ConflictPair, FlightPhase, Runway } from './types';
-import { findRunway, reciprocalIdent } from './airport';
-import { describeCommand, issueCommand, updateAircraft, type SimContext, type Wind } from './aircraft';
-import { detectConflicts, DEFAULT_THRESHOLDS } from './conflict';
-import { createWeather, updateWeather, inStorm, type WeatherState } from './weather';
-import { capacityFor, createScoreState, penalize, PENALTY, ratesFor, scoreDeparture, scoreLanding, type ScoreState } from './score';
-import { createTrafficState, makeRng, spawnArrival, spawnDeparture, updateTraffic, type TrafficState } from './traffic';
-import { angleDiff, ft2m, m2nm } from './units';
-import { hdist3, headingToVec } from './vec';
+export const TICK = 0.1;
+/** 1 现实秒 = 6 游戏秒（1x）。班次 45 分钟 ≈ 7.5 现实分钟。 */
+export const TIME_SCALE = 6;
 
-/** 逻辑步长频率 */
-export const TICK_RATE = 20;
-export const TICK_DT = 1 / TICK_RATE;
-/** 单帧最多推进的逻辑步数，防止卡顿后螺旋 */
-const MAX_STEPS_PER_FRAME = 40;
-/** 航迹拖尾采样间隔（秒） */
-const TRAIL_INTERVAL = 5;
-/** 航迹拖尾保留时长（秒） */
-const TRAIL_LIFETIME = 120;
-/** 落地后多久移除飞机（视为脱离跑道，秒） */
-const LANDED_REMOVE_DELAY = 25;
-/**
- * 生成上限相对容量的余量。容量是"能同时管几架"的难度旋钮，不是硬闸：
- * 卡死在 capacity 会让开局预置交通正好占满名额、生成累积器永远攒不到阈值，
- * 场地从此静止。
- */
-const SPAWN_HEADROOM = 2;
-
-/**
- * 电台记录的类别：
- *   atc   —— 管制员指令（玩家下发）
- *   pilot —— 飞行员复诵 / 请求
- *   其余为系统事件
- */
-export type LogKind = 'atc' | 'pilot' | 'info' | 'good' | 'bad';
-
-export interface LogEntry {
-  t: number;
-  text: string;
-  kind: LogKind;
+interface PendingRadio {
+  at: number;
+  line: RadioLine;
 }
 
-export interface World {
-  airport: Airport;
-  time: number;
-  accumulator: number;
-  /** 时间倍速：1 / 2 / 4 */
-  timeScale: number;
-  paused: boolean;
-  aircraft: Aircraft[];
-  conflicts: ConflictPair[];
-  weather: WeatherState;
-  score: ScoreState;
-  traffic: TrafficState;
-  rand: () => number;
-  selectedId: number | null;
-  log: LogEntry[];
-  /** 当前容量（可同时管制架数） */
-  capacity: number;
-  /** 冲突告警去重键 */
-  conflictKeys: Set<string>;
-  /** 上一帧各机阶段，用于捕捉状态跃迁 */
-  prevPhase: Map<number, FlightPhase>;
-}
+export class World implements SimEnv {
+  readonly level: LevelDef;
+  readonly idx: AirportIndex;
+  readonly rng: Rng;
 
-export interface WorldOptions {
-  airport: Airport;
-  seed?: number;
-  /** 初始风 */
-  windDirection?: number;
-  windSpeed?: number;
-  /** 是否启用雷暴 */
-  storm?: boolean;
-}
+  time = 0;
+  dt = TICK;
+  windDirDeg: number;
+  windKt: number;
 
-export function createWorld(opts: WorldOptions): World {
-  const seed = opts.seed ?? Date.now();
-  const storm = opts.storm
-    ? { pos: { x: 0, y: 0 }, radius: 1, intensity: 1 }
-    : null;
-  const world: World = {
-    airport: opts.airport,
-    time: 0,
-    accumulator: 0,
-    timeScale: 1,
-    paused: false,
-    aircraft: [],
-    conflicts: [],
-    weather: createWeather(opts.windDirection ?? 195, opts.windSpeed ?? 8, storm),
-    score: createScoreState(),
-    traffic: createTrafficState(),
-    rand: makeRng(seed),
-    selectedId: null,
-    log: [],
-    capacity: capacityFor(0),
-    conflictKeys: new Set<string>(),
-    prevPhase: new Map<number, FlightPhase>(),
-  };
-  pushLog(world, 'Aurora 进近开放，雷达管制开始', 'info');
+  aircraft = new Map<string, Aircraft>();
+  radio: RadioLine[] = [];
+  alerts: SimState["alerts"] = [];
+  selectedId: string | null = null;
+  runwayOccupantId: string | null = null;
+  status: "running" | "finished" = "running";
+  score = { landings: 0, takeoffs: 0, violations: 0, goArounds: 0 };
+  conflicts: string[] = [];
 
-  // 预置初始交通：按流率算第一批飞机要几分钟后才到，开局空场体验很差
-  const starNames = Object.keys(opts.airport.stars);
-  for (let i = 0; i < 2 && starNames.length > 0; i++) {
-    const star = starNames[Math.floor(world.rand() * starNames.length)];
-    const ac = spawnArrival(world.traffic.nextId, opts.airport, star, 0, world.rand);
-    if (ac) {
-      world.aircraft.push(ac);
-      world.traffic.nextId++;
-      pushLog(world, `[${ac.callsign}]>[${stationOf(ac)}] ${star} 进场进入雷达管制，请求引导`, 'pilot');
+  private pendingRadio: PendingRadio[] = [];
+  private spawnIndex = 0;
+  private nextAircraftId = 1;
+  private nextRadioId = 1;
+  private violationCooldown = new Map<string, number>();
+  private parkOrder: string[] = [];
+
+  constructor(level: LevelDef) {
+    this.level = level;
+    this.idx = buildAirport(getAirport(level.airportId), level.runwayId);
+    this.windDirDeg = level.wind.dirDeg;
+    this.windKt = level.wind.speedKt;
+    this.rng = new Rng(level.id.length * 7919 + level.flights.length * 104729);
+  }
+
+  // ---------- SimEnv ----------
+
+  aircraftList(): Aircraft[] {
+    return [...this.aircraft.values()];
+  }
+
+  say(seat: RadioLine["seat"], callsign: string, text: string): void {
+    this.radio.push({ id: this.nextRadioId++, t: this.time, seat, callsign, text, tone: seat === "PILOT" ? "readback" : "cmd" });
+    if (this.radio.length > 240) this.radio.splice(0, this.radio.length - 240);
+  }
+
+  private systemLine(text: string): void {
+    this.radio.push({ id: this.nextRadioId++, t: this.time, seat: "SYS", callsign: "—", text, tone: "event" });
+  }
+
+  notify(text: string, tone: "warn" | "danger"): void {
+    this.alerts.push({ id: this.nextRadioId++, text, tone, t: this.time });
+    if (this.alerts.length > 6) this.alerts.shift();
+    this.radio.push({ id: this.nextRadioId++, t: this.time, seat: "SYS", callsign: "—", text, tone: tone === "danger" ? "warn" : "event" });
+  }
+
+  countLanding(ac: Aircraft): void {
+    if (ac.scored.landed) return;
+    ac.scored.landed = true;
+    this.score.landings += 1;
+    this.notify(`${ac.callsign} 落地`, "warn");
+  }
+
+  countTakeoff(ac: Aircraft): void {
+    if (ac.scored.departed) return;
+    ac.scored.departed = true;
+    this.score.takeoffs += 1;
+    this.notify(`${ac.callsign} 起飞`, "warn");
+  }
+
+  addViolation(ac: Aircraft, reason: string, points: number): void {
+    this.score.violations += 1;
+    void points;
+    this.notify(`${ac.callsign} ${reason}`, "danger");
+  }
+
+  occupyRunway(ac: Aircraft): void {
+    this.runwayOccupantId = ac.id;
+  }
+
+  vacateRunway(ac: Aircraft): void {
+    if (this.runwayOccupantId === ac.id) this.runwayOccupantId = null;
+  }
+
+  assignStand(ac: Aircraft): string | null {
+    const used = new Set<string>();
+    for (const other of this.aircraft.values()) {
+      if (other.id !== ac.id && other.standId && this.occupiesStand(other)) used.add(other.standId);
+    }
+    const free = this.idx.def.stands.find((s) => !used.has(s.id));
+    if (free) return free.id;
+    return this.idx.def.stands[0]?.id ?? null;
+  }
+
+  /** 一架飞机是否真的占着机位：离场机只有停着时占，进场机滑入后占 */
+  private occupiesStand(ac: Aircraft): boolean {
+    if (ac.phase === "done") return false;
+    if (ac.kind === "dep") return ac.phase === "parked";
+    return ac.phase === "taxi_in" || ac.phase === "parked";
+  }
+
+  finish(ac: Aircraft): void {
+    ac.phase = "done";
+    this.aircraft.delete(ac.id);
+    this.parkOrder = this.parkOrder.filter((id) => id !== ac.id);
+  }
+
+  // ---------- 主循环 ----------
+
+  step(): void {
+    if (this.status !== "running") return;
+    this.time += TICK;
+
+    this.spawnDue();
+    for (const ac of this.aircraftList()) stepAircraft(ac, this);
+    this.flushRadio();
+    this.updateConflicts();
+    this.checkSector();
+    this.checkParked();
+
+    if (this.time >= this.level.durationMin * 60) {
+      this.status = "finished";
+      this.systemLine("班次结束");
     }
   }
 
-  // 再放一架离场航班在跑道头等着，开局就有事可做
-  const sidNames = Object.keys(opts.airport.sids);
-  if (opts.airport.runways.length > 0 && sidNames.length > 0) {
-    const rw = opts.airport.runways[0];
-    const dep = spawnDeparture(
-      world.traffic.nextId,
-      opts.airport,
-      rw.ident,
-      sidNames[0],
-      0,
-      world.rand,
-    );
-    if (dep) {
-      world.aircraft.push(dep);
-      world.traffic.nextId++;
-      pushLog(world, `[${dep.callsign}]>[TWR] 跑道${rw.ident}外等待，请求起飞`, 'pilot');
+  private spawnDue(): void {
+    const flights = this.level.flights;
+    while (this.spawnIndex < flights.length) {
+      const f = flights[this.spawnIndex]!;
+      if (this.time < f.atMin * 60) break;
+      if (this.aircraft.size >= this.level.maxAircraft) break;
+
+      const id = `ac${this.nextAircraftId++}`;
+      if (f.kind === "dep") {
+        if (f.standId && this.isStandTaken(f.standId)) {
+          // 机位还没空出来，等下一帧再放
+          break;
+        }
+        const ac = spawnDeparture(this, {
+          id,
+          callsign: f.callsign,
+          airline: f.airline,
+          typeId: f.typeId,
+          kind: "dep",
+          standId: f.standId ?? null,
+        });
+        if (!ac) {
+          this.spawnIndex += 1;
+          continue;
+        }
+        this.aircraft.set(ac.id, ac);
+        this.parkOrder.push(ac.id);
+        this.systemLine(`${ac.callsign}（${getType(ac.typeId).name}）停在机位 ${ac.standId}`);
+      } else {
+        const ac = spawnArrival(this, {
+          id,
+          callsign: f.callsign,
+          airline: f.airline,
+          typeId: f.typeId,
+          kind: "arr",
+          standId: null,
+        });
+        this.aircraft.set(ac.id, ac);
+        this.systemLine(`${ac.callsign}（${getType(ac.typeId).name}）进场，距场 ${Math.round(distanceToThreshold(this.idx, ac.pos) / 1000)} 公里`);
+      }
+      this.spawnIndex += 1;
     }
   }
 
-  return world;
-}
-
-export function pushLog(world: World, text: string, kind: LogEntry['kind'] = 'info'): void {
-  world.log.push({ t: world.time, text, kind });
-  if (world.log.length > 120) world.log.splice(0, world.log.length - 120);
-}
-
-export function findAircraft(world: World, id: number): Aircraft | undefined {
-  return world.aircraft.find((a) => a.id === id);
-}
-
-/**
- * 该机当前所属管制席位。
- *
- * 只有一个塔台席位：进近席位没有移交玩法，只是把同一批指令换个标签，
- * 徒增无线电噪声和"我是不是管错段"的困惑。P2 地面管制域再引入 GND。
- */
-export function stationOf(_ac: Aircraft): 'TWR' {
-  return 'TWR';
-}
-
-export function selectedAircraft(world: World): Aircraft | null {
-  if (world.selectedId === null) return null;
-  return findAircraft(world, world.selectedId) ?? null;
-}
-
-/** 跑道占用判定的侧向余量与两端外延（米） */
-const RWY_SIDE = 150;
-const RWY_BEFORE = 400;
-const RWY_AFTER = 250;
-
-/**
- * 该跑道（含反向，同一块道面）此刻是否被别的飞机占着：
- * 地面等待、起飞滑跑、落地滑跑都算占用。返回占用的那架，干净则 null。
- *
- * 这是"往占用的跑道上落地"唯一的反馈手段 —— 不驳回的话玩家只能靠红牌
- * 知道自己干了什么，而那张红牌来自他此刻根本无法控制的间隔判定。
- */
-export function runwayOccupant(world: World, ident: string, exceptId: number): Aircraft | null {
-  const rw = findRunway(world.airport, ident);
-  if (!rw) return null;
-  const u = headingToVec(rw.heading);
-  for (const other of world.aircraft) {
-    if (other.id === exceptId) continue;
-    if (other.phase !== 'GROUND' && other.phase !== 'TAKEOFF' && other.phase !== 'LANDED') continue;
-    const dx = other.pos.x - rw.threshold.x;
-    const dy = other.pos.y - rw.threshold.y;
-    const axial = dx * u.x + dy * u.y;
-    if (axial < -RWY_BEFORE || axial > rw.length + RWY_AFTER) continue;
-    if (Math.abs(dx * -u.y + dy * u.x) > rw.width / 2 + RWY_SIDE) continue;
-    return other;
+  private isStandTaken(standId: string): boolean {
+    for (const ac of this.aircraft.values()) {
+      if (ac.standId === standId && this.occupiesStand(ac)) return true;
+    }
+    return false;
   }
-  return null;
-}
 
-/** 给指定飞机下指令 */
-export function commandAircraft(world: World, id: number, cmd: Command): boolean {
-  const ac = findAircraft(world, id);
-  if (!ac) return false;
-  if (ac.phase === 'LANDED') return false;
+  private flushRadio(): void {
+    if (this.pendingRadio.length === 0) return;
+    const due = this.pendingRadio.filter((p) => p.at <= this.time);
+    if (due.length === 0) return;
+    this.pendingRadio = this.pendingRadio.filter((p) => p.at > this.time);
+    for (const p of due) {
+      this.radio.push(p.line);
+      if (this.radio.length > 240) this.radio.splice(0, this.radio.length - 240);
+    }
+  }
 
-  // 跑道占用互锁：立即驳回（不进复诵队列），不扣分，只在电台里说明原因
-  if (cmd.kind === 'clearedApproach' || cmd.kind === 'takeoff') {
-    const ident = cmd.kind === 'clearedApproach' ? cmd.runway : nearestRunwayIdent(world.airport, ac);
-    if (ident) {
-      const occ = runwayOccupant(world, ident, ac.id);
-      if (occ) {
-        pushLog(
-          world,
-          `[${stationOf(ac)}]>[${ac.callsign}] 跑道${ident}上有${occ.callsign}，${cmd.kind === 'takeoff' ? '暂不起飞' : '暂不落地许可'}`,
-          'atc',
-        );
-        return false;
+  private updateConflicts(): void {
+    const air = this.aircraftList().filter((a) => isAirborne(a) && a.altM > 40);
+    const found: string[] = [];
+    for (let i = 0; i < air.length; i++) {
+      for (let j = i + 1; j < air.length; j++) {
+        const a = air[i]!;
+        const b = air[j]!;
+        const h = dist(a.pos, b.pos);
+        const v = Math.abs(a.altM - b.altM);
+        if (h < nm(3) && v < ft(1000)) {
+          found.push(`${a.id}|${b.id}`);
+          if (h < nm(2) && v < ft(600)) {
+            const key = [a.id, b.id].sort().join("|");
+            const last = this.violationCooldown.get(key) ?? -999;
+            if (this.time - last > 90) {
+              this.violationCooldown.set(key, this.time);
+              this.addViolation(a, `与 ${b.callsign} 失去间隔`, 15);
+            }
+          }
+        }
+      }
+    }
+    this.conflicts = found;
+  }
+
+  private checkSector(): void {
+    for (const ac of this.aircraftList()) {
+      if (ac.phase === "done") continue;
+      if (dist(ac.pos, { x: 0, y: 0 }) > 42000) {
+        this.addViolation(ac, "飞出扇区", 8);
+        this.finish(ac);
       }
     }
   }
 
-  issueCommand(ac, cmd, world.time);
-  ac.hasBeenControlled = true;
-  pushLog(world, `[${stationOf(ac)}]>[${ac.callsign}] ${describeCommand(cmd, ac)}`, 'atc');
-  return true;
-}
-
-// ---------------------------------------------------------------------------
-// 主循环
-// ---------------------------------------------------------------------------
-
-/**
- * 用真实经过时间推进世界。内部按固定步长消费累积器。
- */
-export function stepWorld(world: World, realDt: number): void {
-  if (world.paused) return;
-  // 夹住单帧时间，避免切标签页回来后瞬移
-  const clamped = Math.min(realDt, 0.25);
-  world.accumulator += clamped * world.timeScale;
-
-  let steps = 0;
-  while (world.accumulator >= TICK_DT && steps < MAX_STEPS_PER_FRAME) {
-    world.accumulator -= TICK_DT;
-    simulateTick(world, TICK_DT);
-    steps++;
-  }
-  // 追不上就丢弃，宁可跳时间也不要卡死
-  if (steps >= MAX_STEPS_PER_FRAME) world.accumulator = 0;
-}
-
-function simulateTick(world: World, dt: number): void {
-  world.time += dt;
-  updateWeather(world.weather, world.time);
-
-  const ctx: SimContext = {
-    time: world.time,
-    dt,
-    airport: world.airport,
-    wind: world.weather.wind,
-    // 指令到期生效时记录飞行员复诵（与下发之间隔着 2.5s 复诵延迟）
-    onExecuted: (ac, cmd) => {
-      pushLog(world, `[${ac.callsign}]>[${stationOf(ac)}] ${describeCommand(cmd, ac)}，${ac.callsign}`, 'pilot');
-    },
-  };
-
-  // ---- 1. 推进所有飞机 ----
-  for (const ac of world.aircraft) {
-    updateAircraft(ac, ctx);
-    sampleTrail(world, ac);
-  }
-
-  // ---- 2. 生成交通 ----
-  world.capacity = capacityFor(world.score.score);
-  const rates = ratesFor(world.capacity);
-  const spawned = updateTraffic(
-    world.traffic,
-    rates,
-    dt,
-    world.time,
-    world.airport,
-    world.rand,
-    world.aircraft.length,
-    world.capacity + SPAWN_HEADROOM,
-    // 离场机只往空闲的跑道头排，否则两个入口堆满之后所有方向的落地许可都被驳回
-    (ident) => runwayOccupant(world, ident, -1) === null,
-  );
-  for (const ac of spawned) {
-    world.aircraft.push(ac);
-    world.prevPhase.set(ac.id, ac.phase);
-    pushLog(world, `[${ac.callsign}]>[${stationOf(ac)}] 进入雷达管制`, 'pilot');
-  }
-
-  // ---- 3. 事件判定 ----
-  for (const ac of world.aircraft) handleEvents(world, ac);
-
-  // ---- 4. 冲突探测 ----
-  updateConflicts(world);
-
-  // ---- 5. 清场 ----
-  pruneAircraft(world);
-
-  // 刷新阶段快照
-  for (const ac of world.aircraft) world.prevPhase.set(ac.id, ac.phase);
-}
-
-function sampleTrail(world: World, ac: Aircraft): void {
-  if (world.time - ac.lastTrailTime < TRAIL_INTERVAL) return;
-  ac.lastTrailTime = world.time;
-  ac.trail.push({ t: world.time, x: ac.pos.x, y: ac.pos.y, z: ac.pos.z });
-  while (ac.trail.length > 0 && world.time - ac.trail[0].t > TRAIL_LIFETIME) {
-    ac.trail.shift();
-  }
-}
-
-// ---------------------------------------------------------------------------
-// 事件
-// ---------------------------------------------------------------------------
-
-function handleEvents(world: World, ac: Aircraft): void {
-  const prev = world.prevPhase.get(ac.id);
-
-  // ---- 落地 ----
-  if (ac.phase === 'LANDED' && ac.landedAt === null) {
-    ac.landedAt = world.time;
-    const actual = nearestRunwayIdent(world.airport, ac);
-    scoreLanding(world.score, ac, ac.approach?.runway ?? null, actual, world.time);
-    pushLog(world, `${ac.callsign} 落地${actual ? `，跑道 ${actual}` : ''}`, 'good');
-  }
-
-  // ---- 起飞 ----
-  if (ac.isDeparture && ac.phase === 'CLIMB' && !ac.penaltyFlags.has('evt-departed')) {
-    ac.penaltyFlags.add('evt-departed');
-    scoreDeparture(world.score, ac, world.time);
-    pushLog(world, `${ac.callsign} 离地，沿 SID 爬升`, 'good');
-  }
-
-  // ---- 复飞 ----
-  if (prev === 'APPROACH' && ac.phase === 'GO_AROUND') {
-    penalize(world.score, ac, 'evt-goaround', PENALTY.goAround, '复飞', world.time);
-    pushLog(world, `${ac.callsign} 复飞！`, 'bad');
-  }
-
-  // ---- 穿越雷暴 ----
-  if (world.weather.storm && inStorm(world.weather, ac.pos.x, ac.pos.y) && ac.pos.z < ft2m(30000)) {
-    penalize(world.score, ac, 'evt-storm', 4, '误入雷暴', world.time);
-    pushLog(world, `${ac.callsign} 误入雷暴！`, 'bad');
-  }
-
-  // ---- 飞出管制区 ----
-  const dist = Math.hypot(ac.pos.x, ac.pos.y);
-  if (dist > world.airport.radarRange * 1.2) {
-    if (!ac.isDeparture && ac.phase !== 'LANDED') {
-      penalize(world.score, ac, 'evt-out', PENALTY.outOfBounds, '飞出管制区', world.time);
-      pushLog(world, `${ac.callsign} 已飞出管制区`, 'bad');
-    } else if (ac.isDeparture) {
-      pushLog(world, `${ac.callsign} 移交区调，再见`, 'info');
-    }
-    ac.penaltyFlags.add('evt-remove');
-  }
-}
-
-function pruneAircraft(world: World): void {
-  const keep: Aircraft[] = [];
-  for (const ac of world.aircraft) {
-    if (ac.penaltyFlags.has('evt-remove')) continue;
-    if (
-      ac.phase === 'LANDED' &&
-      ac.landedAt !== null &&
-      world.time - ac.landedAt > LANDED_REMOVE_DELAY
-    ) {
-      continue;
-    }
-    keep.push(ac);
-  }
-  if (keep.length !== world.aircraft.length) {
-    world.aircraft = keep;
-    if (world.selectedId !== null && !keep.some((a) => a.id === world.selectedId)) {
-      world.selectedId = null;
-    }
-  }
-}
-
-/** 找飞机实际所在/落地的跑道（按距离与航向匹配） */
-export function nearestRunwayIdent(airport: Airport, ac: Aircraft): string | null {
-  let best: string | null = null;
-  let bestScore = Infinity;
-  for (const r of airport.runways) {
-    for (const ident of [r.ident, reciprocalIdent(r.ident)]) {
-      const rw: Runway | null = findRunway(airport, ident);
-      if (!rw) continue;
-      const d = hdist3(ac.pos, { x: rw.threshold.x, y: rw.threshold.y, z: ac.pos.z });
-      const headingDiff = Math.abs(angleDiff(ac.heading, rw.heading));
-      if (headingDiff > 60) continue;
-      const score = d + headingDiff * 120;
-      if (score < bestScore) {
-        bestScore = score;
-        best = ident;
+  private checkParked(): void {
+    for (const ac of this.aircraftList()) {
+      if (ac.phase === "parked" && ac.kind === "arr" && ac.removeAt !== null && this.time >= ac.removeAt) {
+        this.finish(ac);
       }
     }
   }
-  return best;
-}
 
-// ---------------------------------------------------------------------------
-// 冲突
-// ---------------------------------------------------------------------------
+  // ---------- 玩家操作 ----------
 
-function updateConflicts(world: World): void {
-  const pairs = detectConflicts(world.aircraft, world.weather.wind, DEFAULT_THRESHOLDS);
-  world.conflicts = pairs;
+  commandOptions(ac: Aircraft): CommandOption[] {
+    return availableCommands(ac, this);
+  }
 
-  const currentKeys = new Set<string>();
-  for (const p of pairs) {
-    const lo = Math.min(p.a, p.b);
-    const hi = Math.max(p.a, p.b);
-    const key = `${lo}-${hi}-${p.severity}`;
-    currentKeys.add(key);
-    if (world.conflictKeys.has(key)) continue;
-    world.conflictKeys.add(key);
-
-    const acA = findAircraft(world, p.a);
-    const acB = findAircraft(world, p.b);
-    if (!acA || !acB) continue;
-    const callsigns = `${acA.callsign} / ${acB.callsign}`;
-
-    switch (p.severity) {
-      case 'LOSS':
-        penalize(world.score, acA, `loss-${key}`, PENALTY.loss, '失去间隔', world.time, 'red');
-        penalize(world.score, acB, `loss-${key}`, PENALTY.loss, '失去间隔', world.time, 'red');
-        pushLog(world, `失去间隔：${callsigns}！`, 'bad');
-        break;
-      case 'CRITICAL':
-        penalize(world.score, acA, `crit-${key}`, PENALTY.critical, '严重冲突', world.time);
-        pushLog(world, `严重冲突：${callsigns}`, 'bad');
-        break;
-      default:
-        // 预测级只提示不扣分：300 s 前瞻下的"将来可能太近"不是违规，
-        // 为消警去做无意义绕飞才是坏玩法
-        pushLog(world, `间隔提醒：${callsigns}`, 'info');
-        break;
+  issue(acId: string, cmd: Command): CommandResult {
+    const ac = this.aircraft.get(acId);
+    if (!ac) return { ok: false, reason: "找不到这架飞机" };
+    const result = executeCommand(this, ac, cmd);
+    if (result.ok) {
+      const seat = result.seat ?? seatOf(cmd);
+      this.say(seat, ac.callsign, result.radio);
+      const text = readbackText(ac, cmd);
+      this.pendingRadio.push({
+        at: this.time + 2.5,
+        line: { id: this.nextRadioId++, t: this.time + 2.5, seat: "PILOT", callsign: ac.callsign, text, tone: "readback" },
+      });
     }
+    return result;
   }
 
-  // 不再存在的告警键要清掉，否则同一对飞机再次冲突不会重新提示
-  for (const k of world.conflictKeys) {
-    if (!currentKeys.has(k)) world.conflictKeys.delete(k);
+  select(id: string | null): void {
+    this.selectedId = id;
   }
-}
 
-// ---------------------------------------------------------------------------
-// 统计辅助（供 UI）
-// ---------------------------------------------------------------------------
-
-export interface WorldStats {
-  time: number;
-  airborne: number;
-  onGround: number;
-  arrivals: number;
-  departures: number;
-  landings: number;
-  departuresDone: number;
-  conflicts: number;
-  worstConflict: ConflictPair['severity'] | null;
-  windDir: number;
-  windSpeedKt: number;
-  visibilityNm: number;
-  capacity: number;
-  /** 实际生成上限（容量 + 余量），供 HUD 显示"在场/上限" */
-  spawnCeiling: number;
-  score: number;
-  /** 黄牌 / 红牌计数 */
-  yellow: number;
-  red: number;
-  trafficLoaded: number;
-}
-
-export function worldStats(world: World): WorldStats {
-  const airborne = world.aircraft.filter((a) => a.phase !== 'GROUND' && a.phase !== 'LANDED').length;
-  const onGround = world.aircraft.length - airborne;
-  const arrivals = world.aircraft.filter((a) => !a.isDeparture).length;
-  const departures = world.aircraft.filter((a) => a.isDeparture).length;
-  const worst = world.conflicts.length > 0 ? world.conflicts[0].severity : null;
-
-  return {
-    time: world.time,
-    airborne,
-    onGround,
-    arrivals,
-    departures,
-    landings: world.score.landed,
-    departuresDone: world.score.departed,
-    conflicts: world.conflicts.length,
-    worstConflict: worst,
-    windDir: world.weather.wind.direction,
-    windSpeedKt: (world.weather.wind.speed / 0.514444),
-    visibilityNm: m2nm(world.weather.visibility),
-    capacity: world.capacity,
-    spawnCeiling: world.capacity + SPAWN_HEADROOM,
-    score: world.score.score,
-    yellow: world.score.yellow,
-    red: world.score.red,
-    trafficLoaded: world.aircraft.length,
-  };
-}
-
-/** 便于外部按需构造风 */
-export function currentWind(world: World): Wind {
-  return world.weather.wind;
+  snapshot(): SimState {
+    const aircraft = this.aircraftList().map((a) => ({ ...a }));
+    return {
+      time: this.time,
+      status: this.status,
+      aircraft,
+      radio: this.radio.slice(-60),
+      selectedId: this.selectedId,
+      score: { ...this.score },
+      runwayOccupant: this.runwayOccupantId,
+      conflicts: [...this.conflicts],
+      alerts: this.alerts.slice(-4),
+      clockMin: this.level.startClockMin + Math.floor(this.time / 60),
+      movementsTarget: this.level.targetMovements,
+    };
+  }
 }

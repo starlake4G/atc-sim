@@ -1,131 +1,206 @@
-/**
- * 机场几何辅助 —— 跑道 / 下滑道 / 航向道 / 扇区判定的纯几何计算
- */
+import type { AirportDef, FixDef, RunwayDef, StandDef, TaxiNodeDef } from "./types";
+import { GLIDE_SLOPE, norm360 } from "./units";
+import { bearing, dist, dot, fromBearing, sub, type Vec2 } from "./vec";
 
-import type { Airport, Runway, Sector, Waypoint } from './types';
-import { bearing, along, headingToVec, pointInPolygon, type Vec2, type Vec3 } from './vec';
-import { angleDiff, deg2rad, ft2m, nm2m } from './units';
-
-export { type Airport, type Runway, type Sector, type Waypoint };
-
-/** 跑道末端（起飞端）坐标 */
-export function runwayEnd(r: Runway): Vec2 {
-  return along(r.threshold, r.heading, r.length);
+export interface AirportIndex {
+  def: AirportDef;
+  runway: RunwayDef;
+  nodes: Map<string, TaxiNodeDef>;
+  stands: Map<string, StandDef>;
+  fixes: Map<string, FixDef>;
+  adjacency: Map<string, { to: string; kt: number }[]>;
+  /** 跑道方向单位向量（指向着陆方向） */
+  dir: Vec2;
+  /** 跑道法向（左正右负，仅用于离线偏差） */
+  normal: Vec2;
+  holdingNode: string;
+  lineupNode: string;
+  /** 从跑道入口算起的脱离口，按距离升序 */
+  exitsByDistance: { name: string; node: string; atM: number; highSpeed: boolean }[];
 }
 
-/** 跑道中心点 */
-export function runwayCenter(r: Runway): Vec2 {
-  return along(r.threshold, r.heading, r.length / 2);
+const DEFAULT_TAXI_KT = 15;
+
+export function buildAirport(def: AirportDef, runwayId: string): AirportIndex {
+  const runway = def.runways.find((r) => r.id === runwayId);
+  if (!runway) throw new Error(`机场 ${def.icao}: 找不到跑道 ${runwayId}`);
+
+  const nodes = new Map(def.nodes.map((n) => [n.id, n]));
+  const stands = new Map(def.stands.map((s) => [s.id, s]));
+  const fixes = new Map(def.fixes.map((f) => [f.name, f]));
+  const adjacency = new Map<string, { to: string; kt: number }[]>();
+  for (const n of def.nodes) adjacency.set(n.id, []);
+
+  for (const e of def.edges) {
+    if (!nodes.has(e.a)) throw new Error(`机场 ${def.icao}: 边 ${e.a}-${e.b} 引用了不存在的节点 ${e.a}`);
+    if (!nodes.has(e.b)) throw new Error(`机场 ${def.icao}: 边 ${e.a}-${e.b} 引用了不存在的节点 ${e.b}`);
+    const kt = e.maxKt ?? DEFAULT_TAXI_KT;
+    adjacency.get(e.a)!.push({ to: e.b, kt });
+    adjacency.get(e.b)!.push({ to: e.a, kt });
+  }
+
+  const holdingNode = def.nodes.find((n) => n.kind === "holding")?.id;
+  const lineupNode = def.nodes.find((n) => n.kind === "lineup")?.id;
+  if (!holdingNode) throw new Error(`机场 ${def.icao}: 缺少 holding 节点（跑道外等待点）`);
+  if (!lineupNode) throw new Error(`机场 ${def.icao}: 缺少 lineup 节点（进跑道点）`);
+
+  for (const s of def.stands) {
+    if (!nodes.has(s.node)) throw new Error(`机场 ${def.icao}: 机位 ${s.id} 引用了不存在的节点 ${s.node}`);
+  }
+  if (!fixes.has(def.arrival.entryFix)) throw new Error(`机场 ${def.icao}: 缺少进场入口点 ${def.arrival.entryFix}`);
+  if (!fixes.has(def.arrival.iafFix)) throw new Error(`机场 ${def.icao}: 缺少 IAF ${def.arrival.iafFix}`);
+  for (const f of def.departure) {
+    if (!fixes.has(f)) throw new Error(`机场 ${def.icao}: 离场航路点 ${f} 不存在`);
+  }
+
+  // 连通性：每个机位都必须能滑到跑道外等待点，否则必然出现"永远到不了"的死锁
+  const reach = new Set<string>();
+  const queue = [holdingNode];
+  while (queue.length > 0) {
+    const cur = queue.pop()!;
+    if (reach.has(cur)) continue;
+    reach.add(cur);
+    for (const nb of adjacency.get(cur) ?? []) queue.push(nb.to);
+  }
+  for (const s of def.stands) {
+    if (!reach.has(s.node)) throw new Error(`机场 ${def.icao}: 机位 ${s.id} 与跑道外等待点不连通`);
+  }
+  for (const ex of runway.exits) {
+    if (!reach.has(ex.node)) throw new Error(`机场 ${def.icao}: 脱离口 ${ex.name} 与滑行道不连通`);
+  }
+
+  const dir = fromBearing(runway.hdg);
+  const normal = { x: -dir.y, y: dir.x };
+
+  return {
+    def,
+    runway,
+    nodes,
+    stands,
+    fixes,
+    adjacency,
+    dir,
+    normal,
+    holdingNode,
+    lineupNode,
+    exitsByDistance: [...runway.exits].sort((a, b) => a.atM - b.atM),
+  };
 }
 
-/** 反向跑道识别号，18L → 36R */
-export function reciprocalIdent(ident: string): string {
-  const m = /^(\d{2})([LCR]?)$/.exec(ident.trim().toUpperCase());
-  if (!m) return ident;
-  const num = ((parseInt(m[1], 10) + 18 - 1) % 36) + 1;
-  const sideMap: Record<string, string> = { L: 'R', R: 'L', C: 'C', '': '' };
-  return `${String(num).padStart(2, '0')}${sideMap[m[2]] ?? ''}`;
+/** 最近的可脱离口（按当前地速估算需要的滑跑距离） */
+export function pickExit(idx: AirportIndex, sAlongM: number, gs: number): { name: string; node: string; atM: number } | null {
+  const need = Math.max(0, (gs * gs) / (2 * 2.2)); // 2.2 m/s² 减速度
+  for (const ex of idx.exitsByDistance) {
+    if (ex.atM >= sAlongM + need) return ex;
+  }
+  return idx.exitsByDistance[idx.exitsByDistance.length - 1] ?? null;
 }
 
-/**
- * 下滑道高度：距接地点距离 → 该处应有的高度（米）
- * 3° 下滑角近似：每海里下降约 318 ft，这里用正切精算。
- */
-export function glidePathAltitude(runway: Runway, distanceFromThreshold: number): number {
-  const gs = deg2rad(runway.glideslope);
-  return runway.elevation + distanceFromThreshold * Math.tan(gs);
+/** 沿跑道方向、距入口的距离（负值表示还没到入口） */
+export function alongRunway(idx: AirportIndex, pos: Vec2): number {
+  return dot(sub(pos, idx.runway.threshold), idx.dir);
 }
 
-/** 距接地点多远时处于某个高度（下滑道反解） */
-export function distanceForAltitude(runway: Runway, altitude: number): number {
-  const gs = deg2rad(runway.glideslope);
-  const agl = Math.max(0, altitude - runway.elevation);
-  return agl / Math.tan(gs);
+/** 相对跑道中心线的横向偏差（米），正为跑道左侧 */
+export function lateralOffset(idx: AirportIndex, pos: Vec2): number {
+  return dot(sub(pos, idx.runway.threshold), idx.normal);
 }
 
-/**
- * 是否已截获航向道：
- * 1) 与跑道中心线延长线的横向偏离在容差内
- * 2) 位于接地点之前（进近侧）
- * 3) 航向与跑道航向夹角在限制内（真实约 30°，游戏中放宽到 45°）
- */
-export function localizerCapture(
-  pos: Vec3,
-  heading: number,
-  runway: Runway,
-  lateralToleranceM = nm2m(1.0),
-  maxInterceptAngle = 45,
-): { captured: boolean; lateral: number; lateralSigned: number; distance: number; angle: number } {
-  const u = headingToVec(runway.heading);
-  // 从接地点指向飞机
-  const dx = pos.x - runway.threshold.x;
-  const dy = pos.y - runway.threshold.y;
-  // 沿跑道方向的投影（负数 = 在接地点之前，即进近侧）
-  const axial = dx * u.x + dy * u.y;
-  // 横向偏移（带符号，正 = 位于中心线右侧）
-  const lateralSigned = dx * -u.y + dy * u.x;
-  const lateral = Math.abs(lateralSigned);
-
-  // 航向与跑道方向的夹角（0–180°）
-  const angle = Math.abs(angleDiff(heading, runway.heading));
-
-  const before = axial < 0;
-  const captured = before && lateral <= lateralToleranceM && angle <= maxInterceptAngle;
-  return { captured, lateral, lateralSigned, distance: Math.hypot(dx, dy), angle };
+export function distanceToThreshold(idx: AirportIndex, pos: Vec2): number {
+  return dist(pos, idx.runway.threshold);
 }
 
-/**
- * 在一个机场内按识别号找跑道（支持传入 18L / 36R 两个方向）
- */
-export function findRunway(airport: Airport, ident: string): Runway | null {
-  const want = ident.trim().toUpperCase();
-  for (const r of airport.runways) {
-    if (r.ident.toUpperCase() === want) return r;
-    if (reciprocalIdent(r.ident).toUpperCase() === want) {
-      // 反向：构造一条镜像跑道
-      return {
-        ...r,
-        ident: reciprocalIdent(r.ident),
-        heading: (r.heading + 180) % 360,
-        threshold: runwayEnd(r),
-      };
+/** 三度下滑道在该位置应处的高度（米）。距入口越远越高。 */
+export function glideAltM(idx: AirportIndex, pos: Vec2): number {
+  const beforeThreshold = -alongRunway(idx, pos);
+  return idx.def.elevationM + Math.max(0, beforeThreshold) * GLIDE_SLOPE;
+}
+
+export function nodePos(idx: AirportIndex, id: string): Vec2 {
+  const n = idx.nodes.get(id);
+  if (!n) throw new Error(`未知滑行节点 ${id}`);
+  return n.pos;
+}
+
+/** Dijkstra：返回节点 id 序列（含起终点），不可达返回 null */
+export function findTaxiPath(idx: AirportIndex, from: string, to: string): string[] | null {
+  if (from === to) return [from];
+  const distTo = new Map<string, number>();
+  const prev = new Map<string, string>();
+  const visited = new Set<string>();
+  distTo.set(from, 0);
+  const open = new Set<string>([from]);
+  while (open.size > 0) {
+    let cur: string | null = null;
+    let best = Infinity;
+    for (const id of open) {
+      const d = distTo.get(id) ?? Infinity;
+      if (d < best) {
+        best = d;
+        cur = id;
+      }
+    }
+    if (cur === null) break;
+    open.delete(cur);
+    if (cur === to) break;
+    visited.add(cur);
+    for (const nb of idx.adjacency.get(cur) ?? []) {
+      if (visited.has(nb.to)) continue;
+      const nd = best + dist(nodePos(idx, cur), nodePos(idx, nb.to));
+      if (nd < (distTo.get(nb.to) ?? Infinity)) {
+        distTo.set(nb.to, nd);
+        prev.set(nb.to, cur);
+        open.add(nb.to);
+      }
     }
   }
-  return null;
-}
-
-export function findWaypoint(airport: Airport, name: string): Waypoint | null {
-  const want = name.trim().toUpperCase();
-  return airport.waypoints.find((w) => w.name.toUpperCase() === want) ?? null;
-}
-
-/** 飞机所在扇区（返回第一个匹配） */
-export function sectorAt(airport: Airport, pos: Vec3): Sector | null {
-  for (const s of airport.sectors) {
-    if (pos.z < s.floorAlt || pos.z > s.ceilingAlt) continue;
-    if (pointInPolygon({ x: pos.x, y: pos.y }, s.boundary)) return s;
+  if (!distTo.has(to)) return null;
+  const path: string[] = [to];
+  let cur = to;
+  while (cur !== from) {
+    const p = prev.get(cur);
+    if (!p) return null;
+    path.unshift(p);
+    cur = p;
   }
-  return null;
+  return path;
 }
 
-/** 距机场中心距离（局部坐标原点即机场中心，用于判断是否飞出管制区） */
-export function distanceFromField(pos: Vec2): number {
-  return Math.hypot(pos.x, pos.y);
+export function pathPoints(idx: AirportIndex, path: string[]): Vec2[] {
+  return path.map((id) => nodePos(idx, id));
 }
 
-/**
- * 生成把飞机引导到跑道延长线所需的建议切入航向（用于 HUD 提示）
- */
-export function interceptHeading(pos: Vec2, runway: Runway): number {
-  // 目标点：接地点外 10nm
-  const aim = along(runway.threshold, (runway.heading + 180) % 360, nm2m(10));
-  return bearing(pos, aim);
+export function standById(idx: AirportIndex, id: string | undefined): StandDef | null {
+  if (!id) return null;
+  return idx.stands.get(id) ?? null;
 }
 
-/** 高度层校验：中国民航 RVSM 以上（8900m/29100ft）东单西双 */
-export function validCruiseLevel(altitudeM: number, headingDeg: number): boolean {
-  if (altitudeM < ft2m(29100)) return true;
-  const fl = Math.round(altitudeM / ft2m(100));
-  const eastbound = headingDeg >= 0 && headingDeg < 180;
-  return eastbound ? fl % 2 === 1 : fl % 2 === 0;
+/** 从某个坐标出发，沿滑行图到目标节点的折线（起点是飞机自身位置） */
+export function routeFrom(idx: AirportIndex, startPos: Vec2, startNode: string, targetNode: string): Vec2[] | null {
+  const path = findTaxiPath(idx, startNode, targetNode);
+  if (!path) return null;
+  return [startPos, ...pathPoints(idx, path)];
+}
+
+/** 离场航路：起飞后依次飞过的点（用跑道延长线 + 航路点，简化 SID） */
+export function departureRoute(idx: AirportIndex): Vec2[] {
+  const pts = [idx.runway.threshold, ...idx.def.departure.map((f) => idx.fixes.get(f)!.pos)];
+  return pts;
+}
+
+/** 进场程序：入口点 → IAF（之后由玩家引导或截获 ILS） */
+export function arrivalRoute(idx: AirportIndex): Vec2[] {
+  const entry = idx.fixes.get(idx.def.arrival.entryFix)!.pos;
+  const iaf = idx.fixes.get(idx.def.arrival.iafFix)!.pos;
+  return [entry, iaf];
+}
+
+/** 从 IAF 之后默认飞向跑道入口的航向 */
+export function bearingToThreshold(idx: AirportIndex, pos: Vec2): number {
+  return bearing(pos, idx.runway.threshold);
+}
+
+export function runwayHeadingDiff(idx: AirportIndex, hdg: number): number {
+  const d = Math.abs(norm360(hdg) - norm360(idx.runway.hdg));
+  return d > 180 ? 360 - d : d;
 }
