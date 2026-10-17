@@ -369,16 +369,6 @@ export class Scene3D {
       roof.position.set(-700 + i * 130, 20, wz(-260));
       this.scene.add(roof);
     }
-    for (let i = 0; i < 2; i++) {
-      const tank = new THREE.Mesh(
-        new THREE.CylinderGeometry(14, 14, 12, 16),
-        new THREE.MeshStandardMaterial({ color: 0xd6d9dd, roughness: 0.6 }),
-      );
-      tank.position.set(760 + i * 45, 6, wz(-230));
-      tank.castShadow = true;
-      this.scene.add(tank);
-    }
-
     // 塔台
     const tw = def.tower;
     const shaft = new THREE.Mesh(
@@ -409,8 +399,8 @@ export class Scene3D {
     this.view = view;
     if (view === "tower") {
       this.controls.enabled = true;
-      this.camera.position.set(620, 340, wz(-980));
-      this.controls.target.set(200, 0, wz(130));
+      this.camera.position.set(640, 285, wz(-770));
+      this.controls.target.set(280, 0, wz(120));
     } else if (view === "top") {
       this.controls.enabled = true;
       this.camera.position.set(520, 900, wz(1250));
