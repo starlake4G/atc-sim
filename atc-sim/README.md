@@ -6,11 +6,14 @@
 
 ```bash
 npm install
-npm run dev        # http://localhost:5173
+npm run dev        # http://localhost:5173，同时监听 0.0.0.0，局域网可直接访问
 npm run typecheck
 npm run sim:test   # 无头仿真回归（不需要浏览器）
 npm run build
 ```
+
+> 开发与预览服务都绑 `0.0.0.0`（见 `vite.config.ts`）：同一局域网的手机 / 另一台机器用 `http://<本机IP>:5173` 即可打开。
+> 如果外部设备连不上，是 Windows 防火墙拦了 node.exe 的入站，放行"专用网络"即可。
 
 ## 操作
 
