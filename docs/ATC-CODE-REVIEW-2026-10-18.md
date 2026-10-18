@@ -185,7 +185,7 @@ return executeCommand(preview, { ...ac, ... }, cmd);
 | 风重复计入 | 抽出 `groundSpeedFor()`，进近 ETA、离场窗口、抬轮三处共用；不再对地速再加一次风 | `ab5085b` |
 | 预览影子环境 | no-op 白名单改成类型分类 + `AssertNever`：给 `SimEnv` 加方法不登记分类，`tsc` 直接报方法名（已实测会报 `dummyWrite`）；另加泛化断言，对运行中世界逐条指令比对预览前后快照 | `32922d3`/`cf60439` |
 | world 过大 | 冲突/碰撞/出界/停靠移除移到 `safety.ts` 纯函数，`TICK/TIME_SCALE` 移到 `constants.ts`（避免循环 import）；497 → 471 行 | `32922d3` |
-| 3D 远视角 | 中线 0.65→1.5 m、跑道虚线 1.6 m、道面 anisotropy 4→8 + 显式 mipmap；全场机位拉近约三成 | `ce1c252` |
+| 3D 远视角 | 中线 0.65→1.5 m、跑道虚线 1.6 m、道面 anisotropy 4→8 + 显式 mipmap；全场机位拉近约三成；航站楼屋顶降反光（金属度 .55→.08） | `ce1c252`/`4e4e54c` |
 
 `npm run accept` 仍全绿（控制套件 25 → 26 项，合计 134），`npm run build` 通过。
 
