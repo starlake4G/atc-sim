@@ -1,5 +1,6 @@
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { DEFAULT_LEVEL_ID, LEVELS, getLevel } from "../data/levels";
+import { DEFAULT_SPEED } from "../format";
 import { rateShift } from "../sim/scoring";
 import { botTick } from "../sim/bot";
 import { CHALLENGE_ID, DEFAULT_CHALLENGE_SEED, createChallenge, normalizeChallengeSeed } from "../sim/challenge";
@@ -76,7 +77,7 @@ export default function App() {
     setReview(null); reviewRef.current = null; setReviewPlaying(false); playedRadio.current = 0;
     if (level.lesson) world.select(world.aircraftList()[0]?.id ?? null);
     setLevelId(id); setSession({ world, levelId: id }); setSnap(world.snapshot());
-    setPaused(!!level.lesson); setSpeed(1); setView("tower"); setToast(null); setRouteOpen(false); setHelpOpen(false); setPlanOpen(false);
+    setPaused(!!level.lesson); setSpeed(DEFAULT_SPEED); setView("tower"); setToast(null); setRouteOpen(false); setHelpOpen(false); setPlanOpen(false);
   }
 
   useEffect(() => {

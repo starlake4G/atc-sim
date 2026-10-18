@@ -1,5 +1,5 @@
 import { LEVELS } from "../data/levels";
-import { fmtClock } from "../format";
+import { fmtClock, realMinutes } from "../format";
 import { rateShift } from "../sim/scoring";
 import { CHALLENGE_ID, CHALLENGE_VERSION, createChallenge, normalizeChallengeSeed } from "../sim/challenge";
 import type { ControlMode, SimState } from "../sim/types";
@@ -25,7 +25,7 @@ export function StartScreen({ levelId, mode, records, seed, onSeed, onNewSeed, o
   return <div className="overlay menu-overlay"><div className="modal start-modal"><div className="brand">KESTREL <span>APPROACH</span></div><div className="sub">一座机场。一条跑道。每一次放行，都改变接下来的顺序。</div>
     <div className="menu-layout"><div className="cards">{LEVELS.map((level, i) => {
       const best = records[recordKey(level.id, mode, level.id === CHALLENGE_ID ? seed : undefined)];
-      return <button key={level.id} className={`card ${levelId === level.id ? "sel" : ""}`} onClick={() => onPick(level.id)}><span className="card-index">0{i + 1}</span><div><div className="card-name">{level.name}</div><div className="card-meta">{level.lesson ? "引导训练" : "完整班次"} · {level.flights.length} 个航班 · {Math.round(level.durationMin / 6)} 分钟左右</div></div><span className="best-grade">{best?.grade ?? "—"}</span></button>;
+      return <button key={level.id} className={`card ${levelId === level.id ? "sel" : ""}`} onClick={() => onPick(level.id)}><span className="card-index">0{i + 1}</span><div><div className="card-name">{level.name}</div><div className="card-meta">{level.lesson ? "引导训练" : "完整班次"} · {level.flights.length} 个航班 · {realMinutes(level.durationMin)} 分钟左右（1× 实时）</div></div><span className="best-grade">{best?.grade ?? "—"}</span></button>;
     })}</div><div className={`scenario-detail ${selected.seed ? "with-seed" : ""}`}><AirportPreview evening={selected.startClockMin >= 17 * 60} /><span className="eyebrow">{selected.lesson ? "从容练习 · 完整引导" : "安排顺序 · 控制间隔 · 挑战最优解"}</span><h2>{selected.name}</h2><p>{selected.description}</p><div className="scenario-stats"><Metric label="机场" value="KEKS" /><Metric label="跑道" value="27" /><Metric label="目标" value={`${selected.targetMovements} 架次`} /></div>
       <div className="mode-picker"><button className={mode === "standard" ? "on" : ""} onClick={() => onMode("standard")}>标准管制<span>路线许可 + 席位移交</span></button><button className={mode === "assisted" ? "on" : ""} onClick={() => onMode("assisted")}>辅助管制<span>自动滑行，专注起降排序</span></button></div>
       <div className="scenario-note">{mode === "standard" ? "推出完成后申请滑行；进近建立后联系塔台。所有等待都会显示原因。" : "系统协助处理常规地面流程；跑道许可与安全规则保持一致。"}</div>

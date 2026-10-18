@@ -1,6 +1,13 @@
 import type { Aircraft, Phase } from "./sim/types";
 import { NM, toFt, toKt } from "./sim/units";
 
+/** 默认时间倍速。1× 即实时（sim/world 的 TIME_SCALE = 1），所以游戏分钟 = 现实分钟。 */
+export const DEFAULT_SPEED = 1;
+
+/** 班次在给定倍速下的现实分钟数，用于选关页而不是写死一个除 6 的旧值。 */
+export const realMinutes = (durationMin: number, speed = DEFAULT_SPEED): number =>
+  Math.max(1, Math.round(durationMin / speed));
+
 export const fmtClock = (min: number): string => {
   const h = Math.floor(min / 60) % 24;
   const m = Math.floor(min % 60);
