@@ -5,7 +5,7 @@
 
 > 浏览器里的全流程机场管制（ATC）游戏 · A full-loop air traffic control game that runs in your browser.
 
-**在线试玩：https://starlake4G.github.io/atc-sim/**（免安装，打开即玩；由 GitHub Actions 自动构建部署）
+**在线试玩**：[https://starlake4G.github.io/atc-sim/](https://starlake4G.github.io/atc-sim/)（免安装，打开即玩；由 GitHub Actions 自动构建部署）
 
 3D 机场主视图、地面路线工作台、空域排序、席位移交与班次复盘共用同一套确定性仿真状态：画面、地图和回放都由同一个 10Hz 仿真内核驱动。
 
