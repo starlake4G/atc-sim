@@ -1,7 +1,10 @@
 import type { Vec2 } from "./vec";
+import type { RunwayPlanEntry } from "./planning";
 
 export type Seat = "GND" | "TWR" | "APP" | "SYS";
 export type Wake = "L" | "M" | "H";
+export type ControlMode = "assisted" | "standard";
+export type Controller = "GND" | "TWR" | "APP" | "DEP";
 
 export interface AircraftTypeDef {
   id: string;
@@ -35,6 +38,8 @@ export interface TaxiEdgeDef {
   b: string;
   /** 限速（kt），默认 15 */
   maxKt?: number;
+  oneWay?: boolean;
+  traffic?: "arr" | "dep";
 }
 
 export interface StandDef {
@@ -103,6 +108,11 @@ export interface FlightPlanDef {
   atMin: number;
   /** 离场机位（arr 会分配到达机位） */
   standId?: string;
+  /** 挑战关入口与航路；省略时使用机场默认进场。 */
+  entryFix?: string;
+  arrivalRoute?: string[];
+  initialAltFt?: number;
+  initialSpeedKt?: number;
 }
 
 export interface LevelDef {
@@ -121,11 +131,34 @@ export interface LevelDef {
   /** 进度门槛：完成多少架次算过关（评级用） */
   targetMovements: number;
   flights: FlightPlanDef[];
+  description?: string;
+  lesson?: boolean;
+  /** 相同种子对应相同流量计划，成绩按种子分别保存。 */
+  seed?: string;
+  /** 可预告、可恢复的固定运行事件；相同关卡与操作可精确回放。 */
+  operations?: OperationDef[];
+}
+
+export interface WeatherDef { dirDeg: number; speedKt: number; gustKt?: number }
+export type OperationDef = { id: string; name: string; announceMin: number; atMin: number; durationSec: number } & (
+  { kind: "inspection" } | { kind: "weather"; wind: WeatherDef }
+);
+export interface OperationState {
+  id: string;
+  name: string;
+  kind: OperationDef["kind"];
+  stage: "scheduled" | "announced" | "pending" | "active" | "completed";
+  plannedAt: number;
+  durationSec: number;
+  startedAt: number | null;
+  endsAt: number | null;
+  wind?: WeatherDef;
 }
 
 export type Phase =
   | "parked"
   | "pushback"
+  | "taxi_ready"
   | "taxi_out"
   | "hold_short"
   | "lineup"
@@ -152,6 +185,12 @@ export interface Aircraft {
   /** 升降率（m/s，正为爬升） */
   vs: number;
   phase: Phase;
+  controller: Controller;
+  airHolding: boolean;
+  groundNodeId: string | null;
+  groundGoal: "runway" | "stand" | "clear" | null;
+  blockedBy: string | null;
+  scheduledMovementAt: number;
   /** 已许可高度（米），null = 保持当前 */
   clearedAltM: number | null;
   /** 已许可航向，null = 无 */
@@ -171,6 +210,7 @@ export interface Aircraft {
   holding: boolean;
   /** 已给"可以起飞"但还在进跑道：滑到位就直接开始滑跑 */
   takeoffPending: boolean;
+  missedApproachNotified: boolean;
   /** 机长（米），3D 与间隔用 */
   lengthM: number;
   /** 防呆：长时间没有位移则强制推进航路，避免绕圈 */
@@ -201,12 +241,16 @@ export type Command =
   | { kind: "approach"; runwayId: string }
   | { kind: "goAround" }
   | { kind: "land" }
+  | { kind: "cancelLanding" }
   | { kind: "lineup" }
   | { kind: "takeoff" }
   | { kind: "pushback"; hdg: number }
   | { kind: "hold" }
   | { kind: "resume" }
-  | { kind: "exit"; nodeId: string };
+  | { kind: "exit"; nodeId: string }
+  | { kind: "taxi"; route: "main" | "bypass"; via?: string[] }
+  | { kind: "handoff"; controller: Controller }
+  | { kind: "holdAir" };
 
 export interface CommandOption {
   key: string;
@@ -215,6 +259,7 @@ export interface CommandOption {
   group: string;
   command: Command;
   tone?: "primary" | "danger" | "muted";
+  disabledReason?: string;
 }
 
 export type CommandResult =
@@ -241,10 +286,42 @@ export interface SimState {
     takeoffs: number;
     violations: number;
     goArounds: number;
+    points: number;
+    serviced: number;
+    totalDelaySec: number;
+    departuresTransferred: number;
   };
   runwayOccupant: string | null;
   conflicts: string[];
   alerts: { id: number; text: string; tone: "warn" | "danger"; t: number }[];
   clockMin: number;
   movementsTarget: number;
+  events: SimEvent[];
+  runwayPlan: RunwayPlanEntry[];
+  movementReports: MovementReport[];
+  weather: WeatherDef;
+  operations: OperationState[];
+}
+
+export interface MovementReport {
+  callsign: string;
+  aircraftId: string | null;
+  kind: "arr" | "dep";
+  typeId: string;
+  targetAt: number;
+  actualAt: number | null;
+  serviced: boolean;
+  transferred: boolean;
+  closed: boolean;
+  delays: { traffic: number; permission: number; runway: number; flight: number; taxi: number };
+}
+
+export interface SimEvent {
+  id: number;
+  t: number;
+  aircraftId: string;
+  callsign: string;
+  kind: "landing" | "takeoff" | "service" | "violation" | "goAround" | "handoff" | "operation";
+  text: string;
+  points: number;
 }

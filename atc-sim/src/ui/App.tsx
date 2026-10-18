@@ -1,500 +1,291 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { DEFAULT_LEVEL_ID, LEVELS, getLevel } from "../data/levels";
-import { distanceToThreshold } from "../sim/airport";
+import { rateShift } from "../sim/scoring";
 import { botTick } from "../sim/bot";
-import type { Aircraft, SimState } from "../sim/types";
+import { CHALLENGE_ID, DEFAULT_CHALLENGE_SEED, createChallenge, normalizeChallengeSeed } from "../sim/challenge";
+import type { Command, ControlMode, SimState } from "../sim/types";
 import { TIME_SCALE, TICK, World } from "../sim/world";
 import { Scene3D, type ViewMode } from "../views/scene3d";
-import { fmtAlt, fmtClock, fmtDist, fmtHdg, fmtSpd, gradeFor, phaseLabel } from "../format";
+import { GroundMap, Radar, RouteEditor, selectedAircraft } from "./maps";
+import { CommandStrip, FlightList, Operations, RadioLog, TopBar } from "./panels";
+import { Help, Result, StartScreen, readRecords, recordKey, writeRecords } from "./session";
+import { WorkspaceWindow } from "./window";
+import { RunwayPlan, type PlanAction } from "./planning";
+import { advanceToDecision, decisionFlights, recommendedCommand } from "../sim/flow";
+import { ReplayPlayer } from "../sim/replay";
+import { ReplayTransport, ShiftGoals, fmtDuration } from "./experience";
+import { RadioAudio } from "./audio";
 
-interface Session {
-  world: World;
-  levelId: string;
-}
-
-const SPEEDS = [1, 2, 4];
-const VIEW_LABEL: Record<ViewMode, string> = { tower: "塔台", follow: "跟机", top: "俯瞰" };
+interface Session { world: World; levelId: string }
 
 export default function App() {
   const [levelId, setLevelId] = useState(DEFAULT_LEVEL_ID);
+  const [mode, setMode] = useState<ControlMode>("standard");
+  const [challengeSeed, setChallengeSeed] = useState(DEFAULT_CHALLENGE_SEED);
   const [session, setSession] = useState<Session | null>(null);
   const [snap, setSnap] = useState<SimState | null>(null);
   const [paused, setPaused] = useState(false);
   const [speed, setSpeed] = useState(1);
   const [view, setView] = useState<ViewMode>("tower");
   const [toast, setToast] = useState<string | null>(null);
-
+  const [routeOpen, setRouteOpen] = useState(false);
+  const [helpOpen, setHelpOpen] = useState(false);
+  const [planOpen, setPlanOpen] = useState(false);
+  const [records, setRecords] = useState(readRecords);
+  const [layoutEditing, setLayoutEditing] = useState(false);
+  const [layoutReset, setLayoutReset] = useState(0);
+  const [review, setReview] = useState<ReplayPlayer | null>(null);
+  const [reviewPlaying, setReviewPlaying] = useState(false);
+  const [sound, setSound] = useState(false);
+  const [quality, setQuality] = useState<"low" | "balanced" | "high">(() => { try { const saved = localStorage.getItem("kestrel.quality"); return saved === "low" || saved === "high" ? saved : "balanced"; } catch { return "balanced"; } });
+  const [toastTone, setToastTone] = useState("info");
+  const [compactPane, setCompactPane] = useState<string | null>("flights");
+  const [operationFocus, setOperationFocus] = useState(0);
+  const [focused, setFocused] = useState(() => { try { return new URLSearchParams(location.search).get("focus") === "1" || localStorage.getItem("kestrel.focus") === "true"; } catch { return false; } });
+  const [focusPane, setFocusPane] = useState<string | null>(null);
   const stageRef = useRef<HTMLDivElement>(null);
+  const appRef = useRef<HTMLDivElement>(null);
   const labelsRef = useRef<HTMLDivElement>(null);
   const sceneRef = useRef<Scene3D | null>(null);
-  const pausedRef = useRef(paused);
-  const speedRef = useRef(speed);
-  const viewRef = useRef(view);
+  const pausedRef = useRef(false), speedRef = useRef(1), viewRef = useRef<ViewMode>("tower");
   const toastTimer = useRef<number | null>(null);
+  const overlayWasPaused = useRef(false);
+  const savedWorld = useRef<World | null>(null);
+  const reviewRef = useRef<ReplayPlayer | null>(null), reviewPlayingRef = useRef(false), activeWorld = useRef<World | null>(null);
+  const audio = useRef<RadioAudio | null>(null);
+  const playedRadio = useRef(0);
+  const world = review?.world ?? session?.world ?? null;
+  reviewRef.current = review; reviewPlayingRef.current = reviewPlaying; activeWorld.current = world;
+  pausedRef.current = paused; speedRef.current = speed; viewRef.current = view;
+  useEffect(() => { try { localStorage.setItem("kestrel.focus", String(focused)); } catch { /* View remains available without storage. */ } }, [focused]);
 
-  pausedRef.current = paused;
-  speedRef.current = speed;
-  viewRef.current = view;
-
-  const showToast = (text: string) => {
+  const showToast = (text: string, tone = "info") => {
     setToast(text);
-    if (toastTimer.current) window.clearTimeout(toastTimer.current);
-    toastTimer.current = window.setTimeout(() => setToast(null), 2600);
+    setToastTone(tone);
+    if (toastTimer.current !== null) clearTimeout(toastTimer.current);
+    toastTimer.current = window.setTimeout(() => setToast(null), 3600);
   };
 
   function start(id: string) {
-    const lvl = getLevel(id);
-    setLevelId(id);
-    setSession({ world: new World(lvl), levelId: id });
-    setSnap(null);
-    setPaused(false);
-    setSpeed(1);
-    setView("tower");
+    const level = id === CHALLENGE_ID ? createChallenge(challengeSeed) : getLevel(id);
+    if (level.seed) setChallengeSeed(level.seed);
+    const world = new World(level, { mode }); world.step();
+    setCompactPane(innerWidth <= 760 && level.lesson ? null : "flights");
+    setFocusPane(null);
+    setReview(null); reviewRef.current = null; setReviewPlaying(false); playedRadio.current = 0;
+    if (level.lesson) world.select(world.aircraftList()[0]?.id ?? null);
+    setLevelId(id); setSession({ world, levelId: id }); setSnap(world.snapshot());
+    setPaused(!!level.lesson); setSpeed(1); setView("tower"); setToast(null); setRouteOpen(false); setHelpOpen(false); setPlanOpen(false);
   }
 
-  // 调试/截图入口：?level=morning-rush&fast=540&bot=1 直接进入指定进度
   useEffect(() => {
-    const q = new URLSearchParams(window.location.search);
-    const id = q.get("level");
+    const q = new URLSearchParams(location.search), id = q.get("level");
     if (!id) return;
-    const lvl = getLevel(id);
-    const w = new World(lvl);
-    const fast = Number(q.get("fast") ?? "0");
-    if (fast > 0) {
-      const useBot = q.get("bot") === "1";
-      const n = Math.floor(fast / TICK);
-      for (let i = 0; i < n; i++) {
-        w.step();
-        if (useBot && i % 20 === 0) botTick(w);
-      }
-    }
-    setLevelId(id);
-    setSession({ world: w, levelId: id });
-    const v = q.get("view");
-    if (v === "tower" || v === "follow" || v === "top") setView(v);
+    const template = LEVELS.find((level) => level.id === id);
+    if (!template) { showToast("关卡不存在，请重新选择"); return; }
+    const level = id === CHALLENGE_ID ? createChallenge(q.get("seed")) : template;
+    if (level.seed) setChallengeSeed(level.seed);
+    const debugMode = q.get("mode") === "standard" ? "standard" : "assisted";
+    const world = new World(level, { mode: debugMode });
+    const raw = Number(q.get("fast") ?? "0");
+    const fast = Number.isFinite(raw) ? Math.max(0, Math.min(raw, level.durationMin * 60)) : 0;
+    for (let i = 0; i < fast / TICK && world.status === "running"; i++) { world.step(); if (q.get("bot") === "1" && i % 20 === 0) botTick(world); }
+    if (world.time === 0) world.step();
+    setLevelId(id); setMode(debugMode); setSession({ world, levelId: id }); setSnap(world.snapshot());
+    setPaused(q.get("paused") === "1");
+    const initialView = q.get("view"); if (initialView === "tower" || initialView === "follow" || initialView === "top") setView(initialView);
   }, []);
 
-  function restart() {
-    start(levelId);
-  }
-
-  function backToMenu() {
-    sceneRef.current?.dispose();
-    sceneRef.current = null;
-    setSession(null);
-    setSnap(null);
-  }
-
-  // 3D 场景随 session 创建
   useEffect(() => {
     if (!session || !stageRef.current || !labelsRef.current) return;
-    const scene = new Scene3D(stageRef.current, labelsRef.current, session.world, (id) => {
-      session.world.select(id);
-      setSnap(session.world.snapshot());
-    }, { shadows: !new URLSearchParams(window.location.search).has("lite") });
+    const scene = new Scene3D(stageRef.current, labelsRef.current, session.world, (id) => { const current = activeWorld.current; if (current) { current.select(id); setSnap(current.snapshot()); } }, { shadows: quality !== "low" && !new URLSearchParams(location.search).has("lite"), quality });
     sceneRef.current = scene;
-    scene.start();
-    return () => {
-      scene.dispose();
-      sceneRef.current = null;
-    };
-  }, [session]);
+    return () => { scene.dispose(); sceneRef.current = null; };
+  }, [session, quality]);
 
-  // 主循环：定步长推进 + 自由帧率渲染
+  useEffect(() => () => { if (toastTimer.current !== null) clearTimeout(toastTimer.current); audio.current?.dispose(); }, []);
+
   useEffect(() => {
     if (!session) return;
-    let raf = 0;
-    let last = performance.now();
-    let acc = 0;
-    let lastUi = 0;
-    const w = session.world;
-
+    let raf = 0, last = performance.now(), accumulator = 0, lastUi = 0;
+    const world = session.world;
     const frame = (now: number) => {
       raf = requestAnimationFrame(frame);
-      const realDt = Math.min(0.25, (now - last) / 1000);
-      last = now;
-
-      if (!pausedRef.current && w.status === "running") {
-        acc += realDt * TIME_SCALE * speedRef.current;
+      const realDt = Math.min(.25, (now - last) / 1000); last = now;
+      const player = reviewRef.current;
+      const displayWorld = player?.world ?? world;
+      if (player) {
+        accumulator = 0;
+        if (reviewPlayingRef.current) { player.advance(realDt * TIME_SCALE * speedRef.current); if (player.ended) setReviewPlaying(false); }
+      } else if (!pausedRef.current && world.status === "running") {
+        accumulator += realDt * TIME_SCALE * speedRef.current;
         let steps = 0;
-        while (acc >= TICK && steps < 80) {
-          w.step();
-          acc -= TICK;
-          steps += 1;
-        }
-        if (steps >= 80) acc = 0;
+        while (accumulator >= TICK && steps < 80) { world.step(); accumulator -= TICK; steps++; }
+        if (steps === 80) accumulator = 0;
       }
-
-      sceneRef.current?.update(w, realDt, viewRef.current, w.selectedId, w.selectedId);
-      if (now - lastUi > 100) {
-        lastUi = now;
-        setSnap(w.snapshot());
-      }
+      sceneRef.current?.update(displayWorld, realDt, viewRef.current, displayWorld.selectedId, displayWorld.selectedId);
+      if (now - lastUi > 100) { lastUi = now; setSnap(displayWorld.snapshot()); }
     };
-    raf = requestAnimationFrame(frame);
-    return () => cancelAnimationFrame(raf);
+    raf = requestAnimationFrame(frame); return () => cancelAnimationFrame(raf);
   }, [session]);
 
-  // 键盘
+  function closeOverlay() { setRouteOpen(false); setHelpOpen(false); setPlanOpen(false); setPaused(overlayWasPaused.current); }
+  function openRoute() { overlayWasPaused.current = pausedRef.current; setPaused(true); setRouteOpen(true); }
+  function openHelp() { overlayWasPaused.current = pausedRef.current; setPaused(true); setHelpOpen(true); }
+  function openPlan() { overlayWasPaused.current = pausedRef.current; setPaused(true); setPlanOpen(true); }
+
   useEffect(() => {
     if (!session) return;
-    const onKey = (e: KeyboardEvent) => {
-      const w = session.world;
-      if (e.code === "Space") {
-        e.preventDefault();
-        setPaused((p) => !p);
-      } else if (e.key === "1") setSpeed(1);
-      else if (e.key === "2") setSpeed(2);
-      else if (e.key === "4") setSpeed(4);
-      else if (e.key === "F1") {
-        e.preventDefault();
-        setView("tower");
-      } else if (e.key === "F2") {
-        e.preventDefault();
-        setView("follow");
-      } else if (e.key === "F3") {
-        e.preventDefault();
-        setView("top");
-      } else if (e.key === "Tab") {
-        e.preventDefault();
-        const list = w.aircraftList();
-        if (list.length === 0) return;
-        const i = list.findIndex((a) => a.id === w.selectedId);
-        const next = list[(i + 1) % list.length]!;
-        w.select(next.id);
-        setSnap(w.snapshot());
-      } else if (e.key === "Escape") {
-        w.select(null);
-        setSnap(w.snapshot());
-      }
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key === "Escape" && layoutEditing) { setLayoutEditing(false); return; }
+      if (layoutEditing) return;
+      if (event.key === "Escape" && (routeOpen || helpOpen || planOpen)) { closeOverlay(); return; }
+      if (routeOpen || helpOpen || planOpen) return;
+      const target = event.target as HTMLElement;
+      if (target.matches("input, textarea, select") || target.isContentEditable || event.ctrlKey || event.metaKey || event.altKey) return;
+      const world = activeWorld.current!;
+      if (event.code === "Space") {
+        if (event.repeat || target.closest("button")) return;
+        event.preventDefault(); if (reviewRef.current) setReviewPlaying((value) => !value); else setPaused((value) => !value);
+      } else if (["1", "2", "4"].includes(event.key)) setSpeed(Number(event.key));
+      else if (["F1", "F2", "F3"].includes(event.key)) { event.preventDefault(); setView(({ F1: "tower", F2: "follow", F3: "top" } as const)[event.key as "F1"]); }
+      else if (event.key.toLowerCase() === "n" && !event.repeat) { const next = decisionFlights(world)[0]; if (next) pick(next.id); }
+      else if (event.key.toLowerCase() === "v" && !event.repeat && innerWidth > 760) { setFocused((value) => !value); setLayoutEditing(false); setFocusPane(null); }
+      else if (event.key.toLowerCase() === "e" && !event.repeat && !reviewRef.current && world.selectedId && world.status === "running") { const ac = world.aircraft.get(world.selectedId)!; const command = recommendedCommand(world, ac); if (command) issue(command.command); }
+      else if (event.key === "Tab") {
+        if (target.closest("button") && !target.closest(".flights")) return;
+        event.preventDefault(); const aircraft = world.aircraftList(); if (!aircraft.length) return;
+        const i = aircraft.findIndex((ac) => ac.id === world.selectedId);
+        world.select(aircraft[(i + (event.shiftKey ? aircraft.length - 1 : 1)) % aircraft.length]!.id); setSnap(world.snapshot());
+      } else if (event.key === "Escape") { world.select(null); setSnap(world.snapshot()); }
     };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [session]);
+    window.addEventListener("keydown", onKey); return () => window.removeEventListener("keydown", onKey);
+  }, [session, routeOpen, helpOpen, planOpen, layoutEditing]);
 
-  const selected = useMemo(() => {
-    if (!snap || !snap.selectedId) return null;
-    return snap.aircraft.find((a) => a.id === snap.selectedId) ?? null;
-  }, [snap]);
+  useEffect(() => {
+    if (!snap || !sound || review) return;
+    const line = snap.radio.at(-1);
+    if (line && line.id > playedRadio.current) { playedRadio.current = line.id; if (line.tone === "warn" || line.seat === "PILOT") audio.current?.play(line.tone === "warn" ? "alert" : "readback"); }
+  }, [snap?.radio.at(-1)?.id, sound, review]);
 
-  const issue = (cmd: Parameters<World["issue"]>[1]) => {
-    if (!session || !selected) return;
-    const res = session.world.issue(selected.id, cmd);
-    if (!res.ok) showToast(res.reason);
+  useEffect(() => {
+    if (!session || snap?.status !== "finished" || savedWorld.current === session.world) return;
+    savedWorld.current = session.world;
+    const movements = snap.score.landings + snap.score.takeoffs;
+    const record = { grade: rateShift(snap.score, session.world.level, session.world.mode).grade, points: snap.score.points, movements, violations: snap.score.violations, delaySec: snap.score.totalDelaySec };
+    const key = recordKey(session.levelId, session.world.mode, session.world.level.seed);
+    setRecords((previous) => {
+      const old = previous[key];
+      const rank = (grade: string) => "CBAS".indexOf(grade);
+      if (old && (rank(old.grade) > rank(record.grade) || rank(old.grade) === rank(record.grade) && (old.points > record.points || old.points === record.points && (old.delaySec ?? Infinity) <= record.delaySec))) return previous;
+      const updated = { ...previous, [key]: record }; writeRecords(updated); return updated;
+    });
+  }, [session, snap?.status]);
+
+  function backToMenu() { setSession(null); setReview(null); reviewRef.current = null; setReviewPlaying(false); setSnap(null); setToast(null); setRouteOpen(false); setHelpOpen(false); setPlanOpen(false); setLayoutEditing(false); }
+  function pick(id: string) { const world = activeWorld.current; world?.select(id); if (world) setSnap(world.snapshot()); if (innerWidth <= 760) setCompactPane(null); }
+  const selected = snap ? selectedAircraft(snap) : null;
+  useLayoutEffect(() => {
+    const root = appRef.current, panel = root?.querySelector(review ? ".replay-transport" : ".strip");
+    if (!root || !panel) return;
+    let frame: number | null = null, measured = -1;
+    const measure = () => {
+      const height = Math.ceil(panel.getBoundingClientRect().height);
+      if (height !== measured) { measured = height; root.style.setProperty("--command-height", `${height}px`); }
+    };
+    // Defer layout writes out of the observer delivery cycle; stage resizing must not feed back into it.
+    const observer = new ResizeObserver(() => { if (frame === null) frame = requestAnimationFrame(() => { frame = null; measure(); }); });
+    measure(); observer.observe(panel); return () => { observer.disconnect(); if (frame !== null) cancelAnimationFrame(frame); };
+  }, [session, selected?.id, review]);
+  function issue(command: Command) {
+    const world = activeWorld.current;
+    if (!world || reviewRef.current || !world.selectedId) return;
+    const ac = world.aircraft.get(world.selectedId); if (!ac) return;
+    const result = world.issue(ac.id, command);
+    if (!result.ok) { showToast(result.reason, "danger"); audio.current?.play("alert"); }
+    else { showToast(`${ac.callsign} · ${result.radio}`, "success"); audio.current?.play("command"); }
+    setSnap(world.snapshot());
+  }
+  function changePlan(id: string, action: PlanAction) {
+    if (!session) return;
+    const result = session.world.changeRunwayPlan(id, action);
+    if (!result.ok) showToast(result.reason);
     setSnap(session.world.snapshot());
-  };
-
-  return (
-    <div className="app">
-      <div className="stage" ref={stageRef} />
-      <div className="labels" ref={labelsRef} />
-
-      {session && snap && (
-        <>
-          <TopBar
-            snap={snap}
-            paused={paused}
-            speed={speed}
-            view={view}
-            onPause={() => setPaused((p) => !p)}
-            onSpeed={setSpeed}
-            onView={(v) => {
-              setView(v);
-              sceneRef.current?.setView(v);
-            }}
-            onBack={backToMenu}
-          />
-          <FlightList snap={snap} world={session.world} onPick={(id) => {
-            session.world.select(id);
-            setSnap(session.world.snapshot());
-          }} />
-          <RadioLog snap={snap} baseClock={session.world.level.startClockMin} />
-          <GroundMap world={session.world} snap={snap} />
-          {selected && (
-            <CommandStrip
-              ac={selected}
-              snap={snap}
-              distM={distanceToThreshold(session.world.idx, selected.pos)}
-              options={session.world.commandOptions(selected)}
-              onCmd={issue}
-            />
-          )}
-          {!selected && <div className="hint">点击飞机或列表选择航班 · Tab 循环选择</div>}
-          {snap.status === "finished" && (
-            <Result
-              snap={snap}
-              onRestart={restart}
-              onMenu={backToMenu}
-            />
-          )}
-        </>
-      )}
-
-      {!session && <StartScreen levelId={levelId} onPick={setLevelId} onStart={() => start(levelId)} />}
-      {toast && <div className="toast">{toast}</div>}
-    </div>
-  );
-}
-
-function TopBar(props: {
-  snap: SimState;
-  paused: boolean;
-  speed: number;
-  view: ViewMode;
-  onPause: () => void;
-  onSpeed: (n: number) => void;
-  onView: (v: ViewMode) => void;
-  onBack: () => void;
-}) {
-  const { snap } = props;
-  const movements = snap.score.landings + snap.score.takeoffs;
-  return (
-    <div className="topbar">
-      <button className="ghost" onClick={props.onBack} title="返回关卡选择">退出</button>
-      <div className="clock">{fmtClock(snap.clockMin)}</div>
-      <div className="stat"><b>{snap.score.landings}</b><span>落地</span></div>
-      <div className="stat"><b>{snap.score.takeoffs}</b><span>起飞</span></div>
-      <div className="stat"><b>{movements}/{snap.movementsTarget}</b><span>目标</span></div>
-      <div className={`stat ${snap.score.violations > 0 ? "bad" : ""}`}><b>{snap.score.violations}</b><span>违规</span></div>
-      <div className="spacer" />
-      <button className="ghost" onClick={props.onPause}>{props.paused ? "继续" : "暂停"}</button>
-      {SPEEDS.map((s) => (
-        <button key={s} className={`ghost ${props.speed === s ? "on" : ""}`} onClick={() => props.onSpeed(s)}>{s}×</button>
-      ))}
-      {(Object.keys(VIEW_LABEL) as ViewMode[]).map((v) => (
-        <button key={v} className={`ghost ${props.view === v ? "on" : ""}`} onClick={() => props.onView(v)}>{VIEW_LABEL[v]}</button>
-      ))}
-    </div>
-  );
-}
-
-function FlightList({ snap, world, onPick }: { snap: SimState; world: World; onPick: (id: string) => void }) {
-  const arrivals = snap.aircraft.filter((a) => a.kind === "arr");
-  const departures = snap.aircraft.filter((a) => a.kind === "dep");
-  const sortArr = [...arrivals].sort((a, b) => distanceToThreshold(world.idx, a.pos) - distanceToThreshold(world.idx, b.pos));
-  return (
-    <div className="panel flights">
-      <div className="panel-title">航班 <span>{snap.aircraft.length}</span></div>
-      <div className="group-label">进场</div>
-      {sortArr.length === 0 && <div className="empty">暂无</div>}
-      {sortArr.map((ac) => (
-        <FlightRow key={ac.id} ac={ac} world={world} selected={snap.selectedId === ac.id} onPick={onPick} />
-      ))}
-      <div className="group-label">离场</div>
-      {departures.length === 0 && <div className="empty">暂无</div>}
-      {departures.map((ac) => (
-        <FlightRow key={ac.id} ac={ac} world={world} selected={snap.selectedId === ac.id} onPick={onPick} />
-      ))}
-    </div>
-  );
-}
-
-function FlightRow({ ac, world, selected, onPick }: { ac: Aircraft; world: World; selected: boolean; onPick: (id: string) => void }) {
-  const conflict = world.conflicts.some((c) => c.split("|").includes(ac.id));
-  const right = ac.kind === "arr" ? fmtDist(distanceToThreshold(world.idx, ac.pos)) : fmtAlt(ac.altM);
-  return (
-    <button className={`row ${selected ? "sel" : ""} ${conflict ? "conflict" : ""}`} onClick={() => onPick(ac.id)}>
-      <span className="cs">{ac.callsign}</span>
-      <span className="ty">{ac.typeId}</span>
-      <span className="ph">{phaseLabel(ac)}</span>
-      <span className="rt">{right}</span>
-    </button>
-  );
-}
-
-function RadioLog({ snap, baseClock }: { snap: SimState; baseClock: number }) {
-  const ref = useRef<HTMLDivElement>(null);
-  useEffect(() => {
-    const el = ref.current;
-    if (el) el.scrollTop = el.scrollHeight;
-  }, [snap.radio.length]);
-  return (
-    <div className="panel radio">
-      <div className="panel-title">无线电 <span>118.1</span></div>
-      <div className="radio-body" ref={ref}>
-        {snap.radio.map((line) => (
-          <div key={line.id} className={`line ${line.tone}`}>
-            <span className="t">{fmtClock(baseClock + Math.floor(line.t / 60))}</span>
-            <span className="from">{line.seat}</span>
-            <span className="txt">{line.callsign !== "—" ? `${line.callsign} ` : ""}{line.text}</span>
-          </div>
-        ))}
-      </div>
-    </div>
-  );
-}
-
-function CommandStrip({ ac, snap, distM, options, onCmd }: {
-  ac: Aircraft;
-  snap: SimState;
-  distM: number;
-  options: ReturnType<World["commandOptions"]>;
-  onCmd: (cmd: Parameters<World["issue"]>[1]) => void;
-}) {
-  const groups = useMemo(() => {
-    const m = new Map<string, typeof options>();
-    for (const o of options) {
-      const arr = m.get(o.group) ?? [];
-      arr.push(o);
-      m.set(o.group, arr);
+  }
+  function reorderPlan(id: string, targetId: string) {
+    if (!session || id === targetId) return;
+    const world = session.world, list = world.runwayPlan.snapshot(world);
+    const from = list.findIndex((item) => item.aircraftId === id), to = list.findIndex((item) => item.aircraftId === targetId);
+    if (from < 0 || to < 0) return;
+    for (let i = 0; i < Math.abs(to - from); i++) {
+      const result = world.changeRunwayPlan(id, to > from ? "down" : "up");
+      if (!result.ok) { showToast(result.reason); break; }
     }
-    return [...m.entries()];
-  }, [options]);
+    setSnap(world.snapshot());
+  }
+  function advance() {
+    if (!session || reviewRef.current) return;
+    const result = advanceToDecision(session.world);
+    if (result.aircraftId) session.world.select(result.aircraftId);
+    setPaused(true); setSnap(session.world.snapshot());
+    showToast(session.world.status === "finished" ? "本班处理完成，查看调度复盘" : result.operationChanged ? `已推进 ${fmtDuration(result.advanced)}，运行窗口有变化，请检查预告与限制` : result.aircraftId ? result.advanced > .01 ? `已推进 ${fmtDuration(result.advanced)}，请处理新的请求` : "当前已有待办，已选中需要处理的航班" : `已推进 ${fmtDuration(result.advanced)}，暂无新的许可请求`);
+  }
+  function startInspection(id: string) {
+    if (!session || reviewRef.current) return;
+    const result = session.world.startInspection(id);
+    showToast(result.ok ? "检查已开始。先安排地面与空中等待，倒计时结束后自动恢复。" : result.reason, result.ok ? "success" : "danger");
+    setSnap(session.world.snapshot());
+  }
+  function beginReview() {
+    if (!session) return;
+    const player = new ReplayPlayer(session.world.exportReplay());
+    player.seek(Math.min(player.record.endedAt, 1)); player.world.select(player.world.aircraftList()[0]?.id ?? null);
+    reviewRef.current = player; activeWorld.current = player.world; setReview(player); setReviewPlaying(false); setPaused(true); setSnap(player.world.snapshot()); setView("top");
+  }
+  function seekReview(time: number) {
+    if (!review) return;
+    const selectedId = review.world.selectedId;
+    review.seek(time); review.world.select(selectedId ?? review.world.aircraftList()[0]?.id ?? null);
+    activeWorld.current = review.world; setReviewPlaying(false); setSnap(review.world.snapshot());
+  }
+  function closeReview() { reviewRef.current = null; setReview(null); setReviewPlaying(false); activeWorld.current = session?.world ?? null; if (session) setSnap(session.world.snapshot()); }
+  function exportReview() {
+    if (!session) return;
+    const url = URL.createObjectURL(new Blob([JSON.stringify(session.world.exportReplay(), null, 2)], { type: "application/json" }));
+    const link = document.createElement("a"); link.href = url; link.download = `kestrel-${session.levelId}-${session.world.level.seed ?? "shift"}.json`; link.click(); setTimeout(() => URL.revokeObjectURL(url), 1000);
+  }
+  async function toggleSound() {
+    const value = !sound; audio.current ??= new RadioAudio();
+    try { await audio.current.setEnabled(value); setSound(value); } catch { showToast("当前浏览器无法启用提示音"); }
+  }
+  function changeQuality() {
+    const next = quality === "balanced" ? "high" : quality === "high" ? "low" : "balanced";
+    setQuality(next); try { localStorage.setItem("kestrel.quality", next); } catch { /* Session preference still applies. */ }
+  }
+  const next = session ? LEVELS[LEVELS.findIndex((level) => level.id === session.levelId) + 1] : null;
 
-  const runwayBusy = snap.runwayOccupant !== null && snap.runwayOccupant !== ac.id;
-
-  return (
-    <div className="strip">
-      <div className="strip-info">
-        <div className="strip-head">
-          <b>{ac.callsign}</b>
-          <span>{ac.typeId}</span>
-          <span className="phase">{phaseLabel(ac)}</span>
-          {runwayBusy && <span className="busy">跑道被占</span>}
-        </div>
-        <div className="strip-metrics">
-          <Metric label="高度" value={fmtAlt(ac.altM)} />
-          <Metric label="地速" value={`${fmtSpd(ac.gs)}kt`} />
-          <Metric label="航向" value={fmtHdg(ac.hdg)} />
-          <Metric label="距场" value={fmtDist(distM)} />
-        </div>
+  return <div ref={appRef} className={`app ${session ? "in-session" : "in-menu"} ${review ? "review-mode" : ""} ${selected || review ? "has-selection" : ""} ${focused ? "focus-mode" : ""} focus-${focusPane ?? "none"} compact-${compactPane ?? "none"}`}><div className="stage" ref={stageRef} /><div className="labels" ref={labelsRef} />
+    {session && snap && world && <>
+      <TopBar snap={snap} paused={review ? !reviewPlaying : paused} speed={speed} view={view} onPause={() => review ? setReviewPlaying((value) => !value) : setPaused((value) => !value)} onSpeed={setSpeed} onView={(value) => { setView(value); sceneRef.current?.setView(value); }} onBack={backToMenu} onHelp={openHelp} editing={layoutEditing} onLayout={() => { setFocused(false); setFocusPane(null); setLayoutEditing((value) => !value); }} onReset={() => { setLayoutEditing(false); setLayoutReset((value) => value + 1); }} onAdvance={advance} canAdvance={!review && snap.status === "running" && decisionFlights(world).length === 0} sound={sound} onSound={() => void toggleSound()} quality={({ low: "节能", balanced: "均衡", high: "精细" })[quality]} onQuality={changeQuality} focused={focused} onFocus={() => { setFocused((value) => !value); setFocusPane(null); setLayoutEditing(false); }} />
+      <div className="scene-caption"><span className="live-dot" />{review ? "REPLAY" : "LIVE"} / {view === "follow" && !selected ? "选机后跟随" : ({ tower: "机场总览", follow: "航班跟随", top: "地面态势" })[view]}<span>KEKS · {world.level.name}</span></div>
+      {focused && <div className="scene-tools" aria-label="场景工具">{[["ground", "地面"], ["radar", "雷达"], ["radio", "无线电"]].map(([id, label]) => <button key={id} className={focusPane === id ? "on" : ""} aria-expanded={focusPane === id} onClick={() => setFocusPane((value) => value === id ? null : id!)}>{label}</button>)}<span>V 恢复工作台</span></div>}
+      <Operations world={world} snap={snap} onPick={pick} onPlan={review ? () => {} : openPlan} onInspect={startInspection} readOnly={!!review} focusToken={operationFocus} /><WorkspaceWindow id="flights" editing={layoutEditing} resetToken={layoutReset}><FlightList world={world} snap={snap} onPick={pick} /></WorkspaceWindow>
+      <div className={`workbench ${selected || review ? "with-selection" : ""}`}>
+        <WorkspaceWindow id="ground" editing={layoutEditing} resetToken={layoutReset}><GroundMap world={world} snap={snap} onPick={pick} onOpenRoute={review ? () => {} : openRoute} /></WorkspaceWindow>
+        <WorkspaceWindow id="radar" editing={layoutEditing} resetToken={layoutReset}><Radar world={world} snap={snap} onPick={pick} /></WorkspaceWindow>
+        <WorkspaceWindow id="radio" editing={layoutEditing} resetToken={layoutReset}><RadioLog snap={snap} baseClock={world.level.startClockMin} /></WorkspaceWindow>
       </div>
-      <div className="strip-cmds">
-        {options.length === 0 && <span className="none">暂无可用指令</span>}
-        {groups.map(([g, list]) => (
-          <div className="cmd-group" key={g}>
-            <span className="gname">{g}</span>
-            {list.map((o) => (
-              <button key={o.key} className={`cmd ${o.tone ?? ""}`} onClick={() => onCmd(o.command)}>{o.label}</button>
-            ))}
-          </div>
-        ))}
-      </div>
-    </div>
-  );
-}
-
-function Metric({ label, value }: { label: string; value: string }) {
-  return (
-    <div className="metric">
-      <span>{label}</span>
-      <b>{value}</b>
-    </div>
-  );
-}
-
-function GroundMap({ world, snap }: { world: World; snap: SimState }) {
-  const ref = useRef<HTMLCanvasElement>(null);
-  useEffect(() => {
-    const c = ref.current;
-    if (!c) return;
-    const dpr = Math.min(window.devicePixelRatio, 2);
-    const W = 236;
-    const H = 132;
-    c.width = W * dpr;
-    c.height = H * dpr;
-    const g = c.getContext("2d");
-    if (!g) return;
-    g.setTransform(dpr, 0, 0, dpr, 0, 0);
-    g.clearRect(0, 0, W, H);
-    g.fillStyle = "#0e1014";
-    g.fillRect(0, 0, W, H);
-
-    const idx = world.idx;
-    const sx = (W - 16) / 2700;
-    const sy = (H - 12) / 800;
-    const s = Math.min(sx, sy);
-    const px = (x: number) => W / 2 + x * s;
-    const py = (y: number) => H / 2 - (y - 250) * s;
-
-    g.strokeStyle = "#3a424c";
-    g.lineWidth = 3;
-    const runway = idx.runway;
-    g.beginPath();
-    g.moveTo(px(runway.threshold.x), py(0));
-    g.lineTo(px(runway.end.x), py(0));
-    g.stroke();
-
-    g.strokeStyle = "#2b3138";
-    g.lineWidth = 1.4;
-    for (const e of idx.def.edges) {
-      const a = idx.nodes.get(e.a);
-      const b = idx.nodes.get(e.b);
-      if (!a || !b) continue;
-      g.beginPath();
-      g.moveTo(px(a.pos.x), py(a.pos.y));
-      g.lineTo(px(b.pos.x), py(b.pos.y));
-      g.stroke();
-    }
-
-    g.fillStyle = "#4a525c";
-    for (const st of idx.def.stands) {
-      g.fillRect(px(st.pos.x) - 1.5, py(st.pos.y) - 1.5, 3, 3);
-    }
-
-    for (const ac of snap.aircraft) {
-      const hot = snap.conflicts.some((x) => x.split("|").includes(ac.id));
-      g.fillStyle = hot ? "#e24b4a" : ac.id === snap.selectedId ? "#ffffff" : "#7fe3e0";
-      g.beginPath();
-      g.arc(px(ac.pos.x), py(ac.pos.y), ac.id === snap.selectedId ? 3 : 2, 0, Math.PI * 2);
-      g.fill();
-    }
-
-    g.fillStyle = "#6b7480";
-    g.font = "9px ui-monospace, monospace";
-    g.fillText("地面图", 6, 11);
-  }, [world, snap]);
-  return <canvas className="panel map" ref={ref} style={{ width: 236, height: 132 }} />;
-}
-
-function StartScreen({ levelId, onPick, onStart }: { levelId: string; onPick: (id: string) => void; onStart: () => void }) {
-  return (
-    <div className="overlay">
-      <div className="modal">
-        <div className="brand">KESTREL APPROACH</div>
-        <div className="sub">机场管制模拟 · 塔台席位</div>
-        <div className="cards">
-          {LEVELS.map((lvl) => (
-            <button key={lvl.id} className={`card ${levelId === lvl.id ? "sel" : ""}`} onClick={() => onPick(lvl.id)}>
-              <div className="card-name">{lvl.name}</div>
-              <div className="card-meta">
-                {lvl.durationMin} 分钟 · {lvl.flights.length} 个航班 · 目标 {lvl.targetMovements} 架次
-              </div>
-              <div className="card-meta">跑道 {lvl.runwayId} · 风 {lvl.wind.dirDeg}° {lvl.wind.speedKt}kt</div>
-            </button>
-          ))}
-        </div>
-        <button className="primary" onClick={onStart}>开始值班</button>
-        <div className="help">
-          选中飞机后，底部指令条会给出当前阶段可用的管制用语。<br />
-          进场：下高度 → 清 ILS → 可以落地 → 选脱离口。<br />
-          离场：推出 → 自动滑行 → 跑道外等待 → 可以起飞。<br />
-          空格暂停 · 1/2/4 倍速 · F1 塔台 / F2 跟机 / F3 俯瞰 · Tab 切换飞机
-        </div>
-      </div>
-    </div>
-  );
-}
-
-function Result({ snap, onRestart, onMenu }: { snap: SimState; onRestart: () => void; onMenu: () => void }) {
-  const movements = snap.score.landings + snap.score.takeoffs;
-  const { grade, note } = gradeFor(movements, snap.movementsTarget, snap.score.violations);
-  return (
-    <div className="overlay">
-      <div className="modal result">
-        <div className="grade">{grade}</div>
-        <div className="sub">{note}</div>
-        <div className="result-grid">
-          <Metric label="落地" value={String(snap.score.landings)} />
-          <Metric label="起飞" value={String(snap.score.takeoffs)} />
-          <Metric label="违规" value={String(snap.score.violations)} />
-          <Metric label="目标" value={`${movements}/${snap.movementsTarget}`} />
-        </div>
-        <div className="row-btns">
-          <button className="primary" onClick={onRestart}>再值一班</button>
-          <button className="ghost" onClick={onMenu}>选择关卡</button>
-        </div>
-      </div>
-    </div>
-  );
+      <nav className="mobile-navigation" aria-label="工作台面板">{[["flights", "航班"], ["radar", "雷达"], ["ground", "地面"], ["radio", "无线电"]].map(([id, label]) => <button key={id} className={compactPane === id ? "on" : ""} aria-pressed={compactPane === id} onClick={() => setCompactPane((current) => current === id ? null : id!)}>{label}</button>)}{snap.operations.length > 0 && <button className={`mobile-operations ${compactPane === "operations" ? "on" : ""} ${snap.operations.some((event) => event.stage === "active" || event.stage === "announced" || event.stage === "pending") ? "has-event" : ""}`} aria-controls="operation-board" aria-pressed={compactPane === "operations"} onClick={() => { setCompactPane("operations"); setOperationFocus((value) => value + 1); }}>运行<small>{snap.operations.filter((event) => event.stage === "active" || event.stage === "announced" || event.stage === "pending").length || "·"}</small></button>}</nav>
+      {!review && (selected ? <CommandStrip ac={selected} world={world} options={world.commandOptions(selected)} onCmd={issue} onPlanRoute={openRoute} /> : <div className="hint">选择航班开始调度 · <kbd>N</kbd> 下个待办 · <kbd>Tab</kbd> 切换航班</div>)}
+      {!selected && !review && <ShiftGoals snap={snap} world={world} />}
+      {!review && paused && snap.status === "running" && !routeOpen && !helpOpen && !planOpen && <div className="pause-banner"><b>已暂停</b><span>{session.world.level.lesson ? "高亮按钮是当前下一步；E 下达，N 选择待办。" : "可以下达指令、预览路线和安排顺序。"}</span><button onClick={() => setPaused(false)}>继续值班</button></div>}
+      {routeOpen && <RouteEditor world={session.world} snap={snap} onPick={pick} onClose={closeOverlay} onCmd={issue} />}
+      {helpOpen && <Help onClose={closeOverlay} />}
+      {planOpen && <RunwayPlan world={session.world} snap={snap} onClose={closeOverlay} onPick={pick} onChange={changePlan} onReorder={reorderPlan} />}
+      {review && <ReplayTransport record={review.record} time={snap.time} playing={reviewPlaying} onPlay={() => { if (review.ended) seekReview(0); setReviewPlaying((value) => !value); }} onSeek={seekReview} onClose={closeReview} />}
+      {!review && snap.status === "finished" && <Result world={session.world} snap={snap} onRestart={() => start(levelId)} onMenu={backToMenu} onNext={next ? () => start(next.id) : undefined} onReplay={beginReview} onExport={exportReview} />}
+    </>}
+    {!session && <StartScreen levelId={levelId} mode={mode} records={records} seed={challengeSeed} onSeed={setChallengeSeed} onNewSeed={() => setChallengeSeed(`KEKS-${crypto.getRandomValues(new Uint32Array(1))[0]!.toString(36).toUpperCase()}`)} onNormalizeSeed={() => setChallengeSeed(normalizeChallengeSeed(challengeSeed))} onPick={setLevelId} onMode={setMode} onStart={() => start(levelId)} />}
+    {toast && <div className={`toast ${toastTone}`} role={toastTone === "danger" ? "alert" : "status"}>{toast}</div>}
+  </div>;
 }

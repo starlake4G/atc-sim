@@ -2,6 +2,7 @@ import { getType } from "../data/aircraft-types";
 import { alongRunway, bearingToThreshold, glideAltM, lateralOffset, pickExit, routeFrom } from "./airport";
 import type { SimEnv } from "./env";
 import { makeRoute } from "./route";
+import { advanceGround, releaseGround } from "./ground";
 import type { Aircraft, AircraftTypeDef, Phase } from "./types";
 import { DEG, RAD, angleDiff, clamp, ft, kt, norm360 } from "./units";
 import { bearing, dist, fromBearing, type Vec2 } from "./vec";
@@ -10,12 +11,12 @@ const BANK_DEG = 25;
 const AIR_MAX_TURN = 3.5;
 const GROUND_MAX_TURN = 16;
 
-const GROUND_PHASES = new Set<Phase>(["parked", "pushback", "taxi_out", "hold_short", "lineup", "landing", "taxi_in"]);
+const GROUND_PHASES = new Set<Phase>(["parked", "pushback", "taxi_ready", "taxi_out", "hold_short", "lineup", "takeoff", "landing", "taxi_in"]);
 
 export const isGroundPhase = (ac: Aircraft): boolean => GROUND_PHASES.has(ac.phase);
 
 export function isAirborne(ac: Aircraft): boolean {
-  return ac.phase === "arrival" || ac.phase === "approach" || ac.phase === "departure" || ac.phase === "takeoff";
+  return ac.phase === "arrival" || ac.phase === "approach" || ac.phase === "departure";
 }
 
 function maxTurnRate(ac: Aircraft): number {
@@ -69,15 +70,6 @@ function followRoute(ac: Aircraft, lookaheadM: number, dt: number) {
 }
 
 /** 地面：前车太近就停住，避免追尾（也是地面冲突的第一道闸） */
-function blockedByTraffic(ac: Aircraft, env: SimEnv): boolean {
-  for (const o of env.aircraftList()) {
-    if (o.id === ac.id || !isGroundPhase(o)) continue;
-    if (dist(ac.pos, o.pos) > 100) continue;
-    if (Math.abs(angleDiff(bearing(ac.pos, o.pos), ac.hdg)) < 75) return true;
-  }
-  return false;
-}
-
 function touchdown(ac: Aircraft, env: SimEnv): void {
   ac.altM = env.idx.def.elevationM;
   ac.vs = 0;
@@ -89,14 +81,22 @@ function touchdown(ac: Aircraft, env: SimEnv): void {
 }
 
 export function goAround(ac: Aircraft, env: SimEnv): void {
+  env.countGoAround(ac);
   ac.approach = null;
   ac.landCleared = false;
   ac.lineupCleared = false;
   ac.phase = "arrival";
-  ac.route = null;
-  ac.clearedHdg = env.idx.runway.hdg;
+  const { threshold } = env.idx.runway;
+  const { dir, normal } = env.idx;
+  const point = (along: number, side: number) => ({ x: threshold.x + dir.x * along + normal.x * side, y: threshold.y + dir.y * along + normal.y * side });
+  ac.route = makeRoute([ac.pos, point(6000, 0), point(6000, 9000), point(-18000, 9000), point(-18000, 2000), point(-14000, 0)]);
+  ac.clearedHdg = null;
   ac.clearedAltM = ft(3000);
   ac.expedite = false;
+  ac.targetGs = kt(220);
+  ac.missedApproachNotified = true;
+  ac.controller = "APP";
+  ac.airHolding = false;
   env.notify(`${ac.callsign} 执行复飞`, "warn");
 }
 
@@ -113,30 +113,23 @@ export function stepAircraft(ac: Aircraft, env: SimEnv): void {
     }
 
     case "pushback": {
-      const r = ac.route ? ac.route.follow(ac.pos, 22) : null;
-      speedTo(ac, 3, dt);
-      if (r) {
-        if (ac.clearedHdg !== null && r.s < 12) turnTo(ac, ac.clearedHdg, dt);
-        else turnTo(ac, bearing(ac.pos, r.target), dt);
-      }
-      integrate(ac, env, dt);
-      if (!r || r.finished || r.s > 40) {
-        ac.phase = "taxi_out";
+      const finished = advanceGround(ac, env, 5, ac.clearedHdg ?? 0);
+      if (env.mode === "standard" ? finished : finished || (ac.route?.minS ?? 0) > 40) {
+        ac.phase = env.mode === "standard" ? "taxi_ready" : "taxi_out";
         ac.clearedHdg = null;
+        if (env.mode === "standard") { ac.route = null; env.say("GND", ac.callsign, "推出完成，请求滑行许可"); }
       }
       return;
     }
 
+    case "taxi_ready": {
+      ac.gs = 0; ac.vs = 0; ac.altM = elev;
+      if (ac.kind === "arr" && !ac.standId) ac.standId = env.assignStand(ac);
+      return;
+    }
+
     case "taxi_out": {
-      if (ac.holding || blockedByTraffic(ac, env)) {
-        speedTo(ac, 0, dt);
-        integrate(ac, env, dt);
-        return;
-      }
-      const r = followRoute(ac, 35, dt);
-      speedTo(ac, kt(13), dt);
-      integrate(ac, env, dt);
-      if (r && r.finished) {
+      if (advanceGround(ac, env, 15)) {
         ac.phase = "hold_short";
         ac.gs = 0;
         ac.route = null;
@@ -153,10 +146,7 @@ export function stepAircraft(ac: Aircraft, env: SimEnv): void {
     }
 
     case "lineup": {
-      const r = followRoute(ac, 12, dt);
-      speedTo(ac, kt(8), dt);
-      integrate(ac, env, dt);
-      if (!r || r.finished) {
+      if (advanceGround(ac, env, 8)) {
         ac.gs = 0;
         ac.route = null;
         ac.hdg = idx.runway.hdg;
@@ -185,15 +175,19 @@ export function stepAircraft(ac: Aircraft, env: SimEnv): void {
     }
 
     case "departure": {
-      followRoute(ac, 1800, dt);
-      speedTo(ac, kt(250), dt);
+      if (ac.clearedHdg !== null) turnTo(ac, ac.clearedHdg, dt);
+      else followRoute(ac, 1800, dt);
+      speedTo(ac, ac.targetGs, dt);
       verticalTo(ac, ac.clearedAltM ?? ft(5000), dt);
       integrate(ac, env, dt);
       if (env.runwayOccupantId === ac.id && (ac.altM - elev > 100 || alongRunway(idx, ac.pos) < -1200)) {
         env.vacateRunway(ac);
       }
       if ((ac.route && ac.route.minS >= ac.route.total - 1) || dist(ac.pos, idx.runway.threshold) > 42000) {
-        if (ac.altM - elev > ft(1500)) env.finish(ac);
+        if (ac.altM - elev > ft(1500)) {
+          if (env.mode === "standard" && ac.controller !== "DEP") env.addViolation(ac, "未完成离场移交", 8);
+          env.finish(ac);
+        }
       }
       return;
     }
@@ -204,18 +198,15 @@ export function stepAircraft(ac: Aircraft, env: SimEnv): void {
       speedTo(ac, ac.targetGs, dt);
       integrate(ac, env, dt);
       if (r && r.finished) {
+        if (ac.airHolding && ac.route) { ac.route = makeRoute(ac.route.points.map((p) => ({ ...p }))); return; }
         ac.route = null;
         if (ac.clearedHdg === null) ac.clearedHdg = bearingToThreshold(idx, ac.pos);
       }
       if (ac.route === null && ac.clearedHdg !== null) turnTo(ac, ac.clearedHdg, dt);
-      // 没清进近就飞过了跑道头：转回跑道方向重新引导，并提示一次
-      if (alongRunway(idx, ac.pos) > 1500) {
-        if (Math.abs(angleDiff(ac.hdg, idx.runway.hdg)) > 60) {
-          env.notify(`${ac.callsign} 错过进近，已转回`, "warn");
-        }
-        ac.clearedHdg = idx.runway.hdg;
-        ac.clearedAltM = Math.max(ac.clearedAltM ?? 0, ft(2500));
-        ac.route = null;
+      if (alongRunway(idx, ac.pos) > 1500 && !ac.missedApproachNotified) {
+        ac.missedApproachNotified = true;
+        env.notify(`${ac.callsign} 错过进近，请重新引导至 ${idx.def.arrival.iafFix}`, "warn");
+        if (!ac.route) goAround(ac, env);
       }
       return;
     }
@@ -226,7 +217,9 @@ export function stepAircraft(ac: Aircraft, env: SimEnv): void {
 
       // 已飞越跑道入口：给过落地许可就接地，否则复飞
       if (before <= 0) {
-        if (ac.landCleared && env.runwayOccupantId === null) {
+        const stable = Math.abs(lateralOffset(idx, ac.pos)) <= idx.runway.widthM / 2 &&
+          ac.altM <= elev + 15 && Math.abs(angleDiff(ac.hdg, idx.runway.hdg)) <= 10;
+        if (stable && ac.landCleared && env.runwayOccupantId === null) {
           env.occupyRunway(ac);
           touchdown(ac, env);
         } else {
@@ -244,26 +237,18 @@ export function stepAircraft(ac: Aircraft, env: SimEnv): void {
       verticalTo(ac, Math.max(elev, glideAltM(idx, ac.pos)), dt);
 
       const speedKt = before > 15000 ? 230 : before > 9000 ? 180 : before > 5000 ? 160 : getType(ac.typeId).vappKt;
-      speedTo(ac, kt(speedKt), dt);
+      speedTo(ac, Math.max(kt(getType(ac.typeId).vappKt), Math.min(ac.targetGs, kt(speedKt))), dt);
 
-      if (ac.approach && !ac.approach.established && Math.abs(lateralOffset(idx, ac.pos)) < 200) {
+      if (ac.approach && !ac.approach.established && Math.abs(lateralOffset(idx, ac.pos)) < 200 && Math.abs(angleDiff(ac.hdg, idx.runway.hdg)) < 10) {
         ac.approach.established = true;
       }
       integrate(ac, env, dt);
 
-      if (along >= 40 && ac.altM <= elev + 4) {
-        if (ac.landCleared && env.runwayOccupantId === null) {
-          env.occupyRunway(ac);
-          touchdown(ac, env);
-        } else {
-          goAround(ac, env);
-        }
-      }
       return;
     }
 
     case "landing": {
-      ac.gs = Math.max(0, ac.gs - kt(2.2) * dt);
+      ac.gs = Math.max(kt(10), ac.gs - 2.2 * dt);
       ac.hdg = idx.runway.hdg;
       ac.altM = elev;
       // 滑跑：沿跑道方向推进（不能只做投影，否则位置永远不动）
@@ -275,32 +260,50 @@ export function stepAircraft(ac: Aircraft, env: SimEnv): void {
       const exit = ac.exitNodeId
         ? idx.exitsByDistance.find((e) => e.node === ac.exitNodeId) ?? null
         : pickExit(idx, along, ac.gs);
-      if (exit && along >= exit.atM - 30) {
+      if (exit && along >= exit.atM && ac.gs <= kt(20)) {
         const node = idx.nodes.get(exit.node)!;
         ac.phase = "taxi_in";
+        ac.exitNodeId = exit.node;
         ac.pos = { ...node.pos };
         ac.hdg = idx.runway.hdg + 90;
-        ac.gs = Math.max(ac.gs, kt(10));
-        env.vacateRunway(ac);
+        ac.gs = kt(10);
         ac.standId = ac.standId ?? env.assignStand(ac);
+        if (env.mode === "standard") {
+          const clear = idx.def.edges.find((edge) => edge.a === exit.node);
+          if (clear) {
+            ac.route = makeRoute([ac.pos, idx.nodes.get(clear.b)!.pos]);
+            ac.groundGoal = "clear";
+          }
+          return;
+        }
         const stand = idx.stands.get(ac.standId ?? "");
         if (stand) {
-          const pts = routeFrom(idx, ac.pos, exit.node, stand.node);
+          const pts = routeFrom(idx, ac.pos, exit.node, stand.node, "arr");
           if (pts) ac.route = makeRoute(pts);
-        }      }
+        }
+      }
       return;
     }
 
     case "taxi_in": {
-      if (ac.holding || blockedByTraffic(ac, env)) {
-        speedTo(ac, 0, dt);
-        integrate(ac, env, dt);
-        return;
+      // 脱离口仍在跑道中心线上，机尾越过道面后才能释放跑道。
+      if (env.runwayOccupantId === ac.id && Math.abs(lateralOffset(idx, ac.pos)) > idx.runway.widthM / 2 + ac.lengthM) env.vacateRunway(ac);
+      if (!ac.route) {
+        ac.standId = ac.standId ?? env.assignStand(ac);
+        const stand = idx.stands.get(ac.standId ?? "");
+        if (stand && ac.exitNodeId) {
+          const pts = routeFrom(idx, ac.pos, ac.groundNodeId ?? ac.exitNodeId, stand.node, "arr");
+          if (pts) ac.route = makeRoute(pts);
+        }
+        if (!ac.route) { ac.gs = 0; return; }
       }
-      const r = followRoute(ac, 30, dt);
-      speedTo(ac, kt(12), dt);
-      integrate(ac, env, dt);
-      if (r && r.finished) {
+      if (advanceGround(ac, env, 12)) {
+        if (ac.groundGoal === "clear") {
+          ac.phase = "taxi_ready"; ac.route = null; ac.groundGoal = null;
+          env.vacateRunway(ac);
+          env.say("TWR", ac.callsign, "跑道已脱离，请求联系地面");
+          return;
+        }
         const stand = idx.stands.get(ac.standId ?? "");
         if (stand) {
           ac.pos = { ...stand.pos };
@@ -310,6 +313,8 @@ export function stepAircraft(ac: Aircraft, env: SimEnv): void {
         ac.gs = 0;
         ac.route = null;
         ac.removeAt = env.time + 120;
+        releaseGround(ac, env);
+        env.countService(ac);
       }
       return;
     }
@@ -337,6 +342,10 @@ export interface SpawnSpec {
   typeId: string;
   kind: "arr" | "dep";
   standId: string | null;
+  entryFix?: string;
+  arrivalRoute?: string[];
+  initialAltFt?: number;
+  initialSpeedKt?: number;
 }
 
 function baseAircraft(spec: SpawnSpec, type: AircraftTypeDef): Aircraft {
@@ -352,6 +361,12 @@ function baseAircraft(spec: SpawnSpec, type: AircraftTypeDef): Aircraft {
     gs: 0,
     vs: 0,
     phase: "parked",
+    controller: spec.kind === "dep" ? "GND" : "APP",
+    airHolding: false,
+    groundNodeId: null,
+    groundGoal: null,
+    blockedBy: null,
+    scheduledMovementAt: 0,
     clearedAltM: null,
     clearedHdg: null,
     targetGs: 0,
@@ -364,6 +379,7 @@ function baseAircraft(spec: SpawnSpec, type: AircraftTypeDef): Aircraft {
     standId: spec.standId,
     holding: false,
     takeoffPending: false,
+    missedApproachNotified: false,
     lengthM: type.lengthM,
     stuckTimer: 0,
     lastPos: { x: 0, y: 0 },
@@ -375,19 +391,24 @@ function baseAircraft(spec: SpawnSpec, type: AircraftTypeDef): Aircraft {
 
 export function spawnArrival(env: SimEnv, spec: SpawnSpec): Aircraft {
   const idx = env.idx;
-  const entry = idx.fixes.get(idx.def.arrival.entryFix)!;
-  const iaf = idx.fixes.get(idx.def.arrival.iafFix)!;
+  const entryName = spec.entryFix ?? idx.def.arrival.entryFix;
+  const entry = idx.fixes.get(entryName);
+  const routeNames = spec.arrivalRoute ?? [idx.def.arrival.iafFix];
+  const fixes = routeNames.map((name) => idx.fixes.get(name));
+  if (!entry || fixes.some((fix) => !fix) || fixes.length === 0) throw new Error(`无效进场航路：${entryName} → ${routeNames.join(" → ")}`);
+  const points = [entry.pos, ...fixes.map((fix) => fix!.pos)];
   const type = getType(spec.typeId);
   const ac = baseAircraft(spec, type);
   ac.pos = { ...entry.pos };
-  ac.altM = ft(6000);
-  ac.hdg = bearing(entry.pos, iaf.pos);
-  ac.gs = kt(250);
-  ac.targetGs = kt(250);
-  ac.clearedAltM = ft(6000);
+  ac.altM = ft(spec.initialAltFt ?? 6000);
+  ac.hdg = bearing(points[0]!, points[1]!);
+  ac.gs = kt(spec.initialSpeedKt ?? 250);
+  ac.targetGs = ac.gs;
+  ac.clearedAltM = ac.altM;
   ac.phase = "arrival";
-  ac.route = makeRoute([entry.pos, iaf.pos]);
+  ac.route = makeRoute(points);
   ac.spawnedAt = env.time;
+  ac.scheduledMovementAt = env.time + 7 * 60;
   ac.lastPos = { ...ac.pos };
   return ac;
 }
@@ -397,12 +418,15 @@ export function spawnDeparture(env: SimEnv, spec: SpawnSpec): Aircraft | null {
   const stand = idx.stands.get(spec.standId ?? "");
   if (!stand) return null;
   const type = getType(spec.typeId);
+  if (type.wake === "H" && stand.size !== "L") return null;
   const ac = baseAircraft(spec, type);
   ac.pos = { ...stand.pos };
   ac.altM = idx.def.elevationM;
   ac.hdg = stand.hdg;
   ac.phase = "parked";
   ac.spawnedAt = env.time;
+  ac.scheduledMovementAt = env.time + 6 * 60;
+  ac.groundNodeId = stand.node;
   ac.lastPos = { ...ac.pos };
   return ac;
 }
@@ -413,5 +437,6 @@ export function routeViaFix(env: SimEnv, ac: Aircraft, fixName: string): boolean
   if (!fix) return false;
   ac.route = makeRoute([ac.pos, fix.pos]);
   ac.clearedHdg = null;
+  ac.airHolding = false;
   return true;
 }

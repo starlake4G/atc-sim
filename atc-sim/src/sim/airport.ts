@@ -1,5 +1,5 @@
 import type { AirportDef, FixDef, RunwayDef, StandDef, TaxiNodeDef } from "./types";
-import { GLIDE_SLOPE, norm360 } from "./units";
+import { GLIDE_SLOPE, kt, norm360 } from "./units";
 import { bearing, dist, dot, fromBearing, sub, type Vec2 } from "./vec";
 
 export interface AirportIndex {
@@ -8,7 +8,7 @@ export interface AirportIndex {
   nodes: Map<string, TaxiNodeDef>;
   stands: Map<string, StandDef>;
   fixes: Map<string, FixDef>;
-  adjacency: Map<string, { to: string; kt: number }[]>;
+  adjacency: Map<string, { to: string; kt: number; traffic?: "arr" | "dep" }[]>;
   /** 跑道方向单位向量（指向着陆方向） */
   dir: Vec2;
   /** 跑道法向（左正右负，仅用于离线偏差） */
@@ -28,21 +28,25 @@ export function buildAirport(def: AirportDef, runwayId: string): AirportIndex {
   const nodes = new Map(def.nodes.map((n) => [n.id, n]));
   const stands = new Map(def.stands.map((s) => [s.id, s]));
   const fixes = new Map(def.fixes.map((f) => [f.name, f]));
-  const adjacency = new Map<string, { to: string; kt: number }[]>();
+  const adjacency: AirportIndex["adjacency"] = new Map();
   for (const n of def.nodes) adjacency.set(n.id, []);
 
   for (const e of def.edges) {
     if (!nodes.has(e.a)) throw new Error(`机场 ${def.icao}: 边 ${e.a}-${e.b} 引用了不存在的节点 ${e.a}`);
     if (!nodes.has(e.b)) throw new Error(`机场 ${def.icao}: 边 ${e.a}-${e.b} 引用了不存在的节点 ${e.b}`);
     const kt = e.maxKt ?? DEFAULT_TAXI_KT;
-    adjacency.get(e.a)!.push({ to: e.b, kt });
-    adjacency.get(e.b)!.push({ to: e.a, kt });
+    adjacency.get(e.a)!.push({ to: e.b, kt, traffic: e.traffic });
+    if (!e.oneWay) adjacency.get(e.b)!.push({ to: e.a, kt, traffic: e.traffic });
   }
 
   const holdingNode = def.nodes.find((n) => n.kind === "holding")?.id;
   const lineupNode = def.nodes.find((n) => n.kind === "lineup")?.id;
   if (!holdingNode) throw new Error(`机场 ${def.icao}: 缺少 holding 节点（跑道外等待点）`);
   if (!lineupNode) throw new Error(`机场 ${def.icao}: 缺少 lineup 节点（进跑道点）`);
+  const direction = fromBearing(runway.hdg);
+  const expectedLineup = { x: runway.threshold.x + direction.x * 80, y: runway.threshold.y + direction.y * 80 };
+  if (dist(nodes.get(lineupNode)!.pos, expectedLineup) > 10) throw new Error(`机场 ${def.icao}: 跑道 ${runwayId} 尚未配置对应方向的进跑道点`);
+  if (!runway.exits.length) throw new Error(`机场 ${def.icao}: 跑道 ${runwayId} 缺少脱离口`);
 
   for (const s of def.stands) {
     if (!nodes.has(s.node)) throw new Error(`机场 ${def.icao}: 机位 ${s.id} 引用了不存在的节点 ${s.node}`);
@@ -53,21 +57,19 @@ export function buildAirport(def: AirportDef, runwayId: string): AirportIndex {
     if (!fixes.has(f)) throw new Error(`机场 ${def.icao}: 离场航路点 ${f} 不存在`);
   }
 
-  // 连通性：每个机位都必须能滑到跑道外等待点，否则必然出现"永远到不了"的死锁
+  // 反向遍历验证每个机位能到等待点；有向图不能从等待点向外做此检查。
   const reach = new Set<string>();
   const queue = [holdingNode];
   while (queue.length > 0) {
     const cur = queue.pop()!;
     if (reach.has(cur)) continue;
     reach.add(cur);
-    for (const nb of adjacency.get(cur) ?? []) queue.push(nb.to);
+    for (const [from, neighbors] of adjacency) if (neighbors.some((nb) => nb.to === cur)) queue.push(from);
   }
   for (const s of def.stands) {
     if (!reach.has(s.node)) throw new Error(`机场 ${def.icao}: 机位 ${s.id} 与跑道外等待点不连通`);
   }
-  for (const ex of runway.exits) {
-    if (!reach.has(ex.node)) throw new Error(`机场 ${def.icao}: 脱离口 ${ex.name} 与滑行道不连通`);
-  }
+  for (const ex of runway.exits) if (!nodes.has(ex.node)) throw new Error(`机场 ${def.icao}: 脱离口 ${ex.name} 不存在`);
 
   const dir = fromBearing(runway.hdg);
   const normal = { x: -dir.y, y: dir.x };
@@ -89,11 +91,13 @@ export function buildAirport(def: AirportDef, runwayId: string): AirportIndex {
 
 /** 最近的可脱离口（按当前地速估算需要的滑跑距离） */
 export function pickExit(idx: AirportIndex, sAlongM: number, gs: number): { name: string; node: string; atM: number } | null {
-  const need = Math.max(0, (gs * gs) / (2 * 2.2)); // 2.2 m/s² 减速度
-  for (const ex of idx.exitsByDistance) {
-    if (ex.atM >= sAlongM + need) return ex;
-  }
-  return idx.exitsByDistance[idx.exitsByDistance.length - 1] ?? null;
+  return idx.exitsByDistance.find((ex) => usableExit(ex, sAlongM, gs)) ?? null;
+}
+
+export function usableExit(ex: { atM: number; highSpeed: boolean }, along: number, gs: number): boolean {
+  const exitSpeed = kt(ex.highSpeed ? 20 : 12);
+  const brakingDistance = Math.max(0, (gs * gs - exitSpeed * exitSpeed) / (2 * 2.2));
+  return ex.atM >= along - 2 && ex.atM - along + 2 >= brakingDistance;
 }
 
 /** 沿跑道方向、距入口的距离（负值表示还没到入口） */
@@ -123,7 +127,7 @@ export function nodePos(idx: AirportIndex, id: string): Vec2 {
 }
 
 /** Dijkstra：返回节点 id 序列（含起终点），不可达返回 null */
-export function findTaxiPath(idx: AirportIndex, from: string, to: string): string[] | null {
+export function findTaxiPath(idx: AirportIndex, from: string, to: string, traffic?: "arr" | "dep"): string[] | null {
   if (from === to) return [from];
   const distTo = new Map<string, number>();
   const prev = new Map<string, string>();
@@ -145,6 +149,7 @@ export function findTaxiPath(idx: AirportIndex, from: string, to: string): strin
     if (cur === to) break;
     visited.add(cur);
     for (const nb of idx.adjacency.get(cur) ?? []) {
+      if (traffic && nb.traffic && nb.traffic !== traffic) continue;
       if (visited.has(nb.to)) continue;
       const nd = best + dist(nodePos(idx, cur), nodePos(idx, nb.to));
       if (nd < (distTo.get(nb.to) ?? Infinity)) {
@@ -176,8 +181,8 @@ export function standById(idx: AirportIndex, id: string | undefined): StandDef |
 }
 
 /** 从某个坐标出发，沿滑行图到目标节点的折线（起点是飞机自身位置） */
-export function routeFrom(idx: AirportIndex, startPos: Vec2, startNode: string, targetNode: string): Vec2[] | null {
-  const path = findTaxiPath(idx, startNode, targetNode);
+export function routeFrom(idx: AirportIndex, startPos: Vec2, startNode: string, targetNode: string, traffic?: "arr" | "dep"): Vec2[] | null {
+  const path = findTaxiPath(idx, startNode, targetNode, traffic);
   if (!path) return null;
   return [startPos, ...pathPoints(idx, path)];
 }

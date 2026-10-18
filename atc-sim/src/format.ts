@@ -24,6 +24,7 @@ export const fmtHdg = (deg: number): string => String(Math.round(deg) % 360).pad
 export const PHASE_LABEL: Record<Phase, string> = {
   parked: "停靠",
   pushback: "推出中",
+  taxi_ready: "等待滑行许可",
   taxi_out: "滑出",
   hold_short: "跑道外等待",
   lineup: "进跑道",
@@ -37,6 +38,8 @@ export const PHASE_LABEL: Record<Phase, string> = {
 };
 
 export const phaseLabel = (ac: Aircraft): string => {
+  if (ac.airHolding) return "空中等待";
+  if (ac.blockedBy && ac.phase !== "taxi_ready") return "等前机通过";
   if (ac.holding && (ac.phase === "taxi_out" || ac.phase === "taxi_in")) return "等待中";
   return PHASE_LABEL[ac.phase];
 };

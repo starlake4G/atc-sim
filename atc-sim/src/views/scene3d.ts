@@ -1,139 +1,16 @@
 import * as THREE from "three";
 import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
-import { getType } from "../data/aircraft-types";
+import { makeAircraftMesh, updateAircraftModel } from "./aircraft-model";
+import { buildAirportModel } from "./airport-model";
 import type { World } from "../sim/world";
 import { toFt, toKt } from "../sim/units";
+import { EnvironmentModel } from "./environment-model";
+import { LIGHT_LOOKS, lightPeriod, skyTexture, type LightPeriod } from "./lighting";
 
 export type ViewMode = "tower" | "follow" | "top";
 
-const AIRLINE_COLORS = [0x2f6fbf, 0xd9a02a, 0xc9453f, 0x2f9e7a, 0x8a5bbf, 0xcf6f2e, 0x5d7f8f];
-
-function airlineColor(name: string): number {
-  let h = 0;
-  for (let i = 0; i < name.length; i++) h = (h * 31 + name.charCodeAt(i)) >>> 0;
-  return AIRLINE_COLORS[h % AIRLINE_COLORS.length] as number;
-}
-
-/** 世界坐标（x 东 / y 北 / z 高，米）→ three.js（y 上，z 指向南） */
 const wx = (x: number) => x;
 const wz = (y: number) => -y;
-
-function runwayTexture(lengthM: number): THREE.CanvasTexture {
-  const c = document.createElement("canvas");
-  c.width = 2048;
-  c.height = 96;
-  const g = c.getContext("2d")!;
-  g.fillStyle = "#2f3238";
-  g.fillRect(0, 0, 2048, 96);
-  g.fillStyle = "#d9dbe0";
-  g.fillRect(0, 5, 2048, 2);
-  g.fillRect(0, 89, 2048, 2);
-  for (let x = 70; x < 1990; x += 96) g.fillRect(x, 46, 46, 4);
-
-  for (let i = 0; i < 8; i++) {
-    g.fillRect(46, 14 + i * 10, 44, 6);
-    g.fillRect(1958, 14 + i * 10, 44, 6);
-  }
-
-  g.save();
-  g.fillStyle = "#eceef2";
-  g.font = "700 46px system-ui, sans-serif";
-  g.translate(210, 48);
-  g.rotate(-Math.PI / 2);
-  g.textAlign = "center";
-  g.textBaseline = "middle";
-  g.fillText("27", 0, 0);
-  g.restore();
-
-  g.save();
-  g.translate(1838, 48);
-  g.rotate(-Math.PI / 2);
-  g.textAlign = "center";
-  g.textBaseline = "middle";
-  g.fillText("09", 0, 0);
-  g.restore();
-
-  const tex = new THREE.CanvasTexture(c);
-  tex.colorSpace = THREE.SRGBColorSpace;
-  tex.anisotropy = 8;
-  void lengthM;
-  return tex;
-}
-
-function makeAircraftMesh(typeId: string, airline: string): THREE.Group {
-  const t = getType(typeId);
-  const g = new THREE.Group();
-  const L = t.lengthM;
-  const span = L * (t.shape === "wide" ? 0.9 : 0.95);
-  const bodyR = t.shape === "wide" ? 2.9 : t.shape === "turboprop" ? 1.3 : 1.9;
-  const white = new THREE.MeshStandardMaterial({ color: 0xe7e9ee, roughness: 0.55, metalness: 0.1 });
-  const accent = new THREE.MeshStandardMaterial({ color: airlineColor(airline), roughness: 0.5, metalness: 0.15 });
-  const dark = new THREE.MeshStandardMaterial({ color: 0x2a2d33, roughness: 0.8 });
-
-  const body = new THREE.Mesh(new THREE.CylinderGeometry(bodyR, bodyR, L * 0.74, 12), white);
-  body.rotation.z = Math.PI / 2;
-  g.add(body);
-
-  const nose = new THREE.Mesh(new THREE.ConeGeometry(bodyR, L * 0.16, 12), white);
-  nose.rotation.z = -Math.PI / 2;
-  nose.position.x = L * 0.45;
-  g.add(nose);
-
-  const tailCone = new THREE.Mesh(new THREE.ConeGeometry(bodyR, L * 0.14, 12), white);
-  tailCone.rotation.z = Math.PI / 2;
-  tailCone.position.x = -L * 0.44;
-  g.add(tailCone);
-
-  const wings = new THREE.Mesh(new THREE.BoxGeometry(L * 0.2, 0.5, span), white);
-  wings.position.set(L * 0.02, -bodyR * 0.25, 0);
-  g.add(wings);
-
-  const tailPlane = new THREE.Mesh(new THREE.BoxGeometry(L * 0.12, 0.35, span * 0.36), white);
-  tailPlane.position.set(-L * 0.36, 0.2, 0);
-  g.add(tailPlane);
-
-  const fin = new THREE.Mesh(new THREE.BoxGeometry(L * 0.12, L * 0.14, 0.4), accent);
-  fin.position.set(-L * 0.37, L * 0.09, 0);
-  g.add(fin);
-
-  const engineCount = t.shape === "turboprop" ? 0 : 2;
-  for (let i = 0; i < engineCount; i++) {
-    const s = i === 0 ? -1 : 1;
-    const eng = new THREE.Mesh(new THREE.CylinderGeometry(bodyR * 0.5, bodyR * 0.5, L * 0.11, 10), dark);
-    eng.rotation.z = Math.PI / 2;
-    eng.position.set(L * 0.05, -bodyR * 0.55, s * span * 0.24);
-    g.add(eng);
-  }
-  if (t.shape === "turboprop") {
-    for (const s of [-1, 1]) {
-      const eng = new THREE.Mesh(new THREE.BoxGeometry(L * 0.13, bodyR * 0.8, bodyR * 0.8), accent);
-      eng.position.set(L * 0.03, -0.2, s * span * 0.26);
-      g.add(eng);
-    }
-  }
-
-  for (const s of [-1, 1]) {
-    const gear = new THREE.Mesh(new THREE.BoxGeometry(1.2, 2.2, 2.2), dark);
-    gear.position.set(L * 0.06, -bodyR - 0.8, s * span * 0.18);
-    g.add(gear);
-  }
-
-  const windshield = new THREE.Mesh(new THREE.BoxGeometry(L * 0.055, bodyR * 0.42, bodyR * 1.15), dark);
-  windshield.position.set(L * 0.355, bodyR * 0.42, 0);
-  g.add(windshield);
-
-  for (const s of [-1, 1]) {
-    const winglet = new THREE.Mesh(new THREE.BoxGeometry(L * 0.02, bodyR * 1.1, 0.25), accent);
-    winglet.position.set(L * 0.02, bodyR * 0.55, s * span * 0.5);
-    g.add(winglet);
-  }
-
-  const belly = new THREE.Mesh(new THREE.BoxGeometry(L * 0.6, 0.3, bodyR * 1.6), dark);
-  belly.position.set(-L * 0.02, -bodyR * 0.92, 0);
-  g.add(belly);
-
-  return g;
-}
 
 export class Scene3D {
   private renderer: THREE.WebGLRenderer;
@@ -148,38 +25,55 @@ export class Scene3D {
   private followId: string | null = null;
   private lastFollowId: string | null = null;
   private world: World;
-  private raf = 0;
-  private lastTime = 0;
+  private disposed = false;
   private tmp = new THREE.Vector3();
   private onSelect: (id: string | null) => void;
   private boundClick: (e: MouseEvent) => void;
   private resizeObs: ResizeObserver;
+  private resizeFrame: number | null = null;
+  private renderWidth = 0;
+  private renderHeight = 0;
   private el: HTMLElement;
   private shadows: boolean;
+  private pointerStart = { x: 0, y: 0 };
+  private boundPointerDown: (e: PointerEvent) => void;
+  private routeLine = new THREE.Line(new THREE.BufferGeometry(), new THREE.LineBasicMaterial({ color: 0x9ae9cc, transparent: true, opacity: .7, depthWrite: false }));
+  private halo = new THREE.Mesh(new THREE.RingGeometry(14, 14.35, 80), new THREE.MeshBasicMaterial({ color: 0xb7ebd8, transparent: true, opacity: .38, side: THREE.DoubleSide, depthWrite: false }));
+  private routeRefresh = 0;
+  private quality: "low" | "balanced" | "high";
+  private environment = new EnvironmentModel();
+  private period: LightPeriod;
+  private skyMap: THREE.Texture | null = null;
+  private reflection: THREE.WebGLRenderTarget | null = null;
+  private sun: THREE.DirectionalLight | null = null;
+  private sunOffset = new THREE.Vector3();
+  private shadowRadius = 1800;
 
   constructor(
     el: HTMLElement,
     labelsEl: HTMLDivElement,
     world: World,
     onSelect: (id: string | null) => void,
-    opts: { shadows?: boolean } = {},
+    opts: { shadows?: boolean; quality?: "low" | "balanced" | "high" } = {},
   ) {
     this.el = el;
     this.world = world;
     this.onSelect = onSelect;
     this.labels = labelsEl;
     this.shadows = opts.shadows !== false;
+    this.quality = opts.quality ?? "balanced";
+    this.period = lightPeriod(world.level.startClockMin + world.time / 60);
 
-    this.renderer = new THREE.WebGLRenderer({ antialias: true });
-    this.renderer.setPixelRatio(this.shadows ? Math.min(window.devicePixelRatio, 2) : 1);
+    this.renderer = new THREE.WebGLRenderer({ antialias: true, logarithmicDepthBuffer: true });
+    this.renderer.setPixelRatio(this.shadows ? Math.min(window.devicePixelRatio, this.quality === "high" ? 2 : 1.5) : 1);
     this.renderer.setSize(el.clientWidth, el.clientHeight);
     this.renderer.shadowMap.enabled = this.shadows;
     this.renderer.shadowMap.type = THREE.PCFSoftShadowMap;
     this.renderer.toneMapping = THREE.ACESFilmicToneMapping;
-    this.renderer.toneMappingExposure = 1.18;
+    this.renderer.toneMappingExposure = LIGHT_LOOKS[this.period].exposure;
     el.appendChild(this.renderer.domElement);
 
-    this.camera = new THREE.PerspectiveCamera(58, el.clientWidth / Math.max(1, el.clientHeight), 2, 60000);
+    this.camera = new THREE.PerspectiveCamera(48, el.clientWidth / Math.max(1, el.clientHeight), 1, 60000);
     this.controls = new OrbitControls(this.camera, this.renderer.domElement);
     this.controls.enableDamping = true;
     this.controls.dampingFactor = 0.08;
@@ -190,44 +84,39 @@ export class Scene3D {
     this.buildSky();
     this.buildLights();
     this.buildAirport();
+    this.scene.add(this.environment.root);
     this.scene.add(this.aircraftLayer);
+    this.routeLine.geometry.setAttribute("position", new THREE.BufferAttribute(new Float32Array(256 * 3), 3)); this.routeLine.geometry.setDrawRange(0, 0); this.routeLine.frustumCulled = false;
+    this.halo.rotation.x = -Math.PI / 2; this.halo.visible = false; this.scene.add(this.routeLine, this.halo);
     this.setView("tower");
 
     this.boundClick = (e: MouseEvent) => this.handleClick(e);
+    this.boundPointerDown = (e) => { this.pointerStart = { x: e.clientX, y: e.clientY }; };
+    this.renderer.domElement.addEventListener("pointerdown", this.boundPointerDown);
     this.renderer.domElement.addEventListener("click", this.boundClick);
-    this.resizeObs = new ResizeObserver(() => this.resize());
+    this.resizeObs = new ResizeObserver(() => { if (this.resizeFrame === null) this.resizeFrame = requestAnimationFrame(() => { this.resizeFrame = null; this.resize(); }); });
     this.resizeObs.observe(el);
     this.resize();
   }
 
   private buildSky(): void {
-    const c = document.createElement("canvas");
-    c.width = 8;
-    c.height = 256;
-    const g = c.getContext("2d")!;
-    const grad = g.createLinearGradient(0, 0, 0, 256);
-    grad.addColorStop(0, "#1f4f88");
-    grad.addColorStop(0.42, "#7fb0d8");
-    grad.addColorStop(0.56, "#cfe2ef");
-    grad.addColorStop(1, "#c9d8c6");
-    g.fillStyle = grad;
-    g.fillRect(0, 0, 8, 256);
-    const tex = new THREE.CanvasTexture(c);
-    tex.colorSpace = THREE.SRGBColorSpace;
-    const geo = new THREE.SphereGeometry(42000, 24, 16);
-    const mat = new THREE.MeshBasicMaterial({ map: tex, side: THREE.BackSide, depthWrite: false, fog: false });
-    this.scene.add(new THREE.Mesh(geo, mat));
-    this.scene.fog = new THREE.Fog(0xc4d8e8, 3000, 26000);
+    this.skyMap = skyTexture(this.period); this.scene.background = this.skyMap;
+    if (this.shadows && this.quality !== "low") {
+      const pmrem = new THREE.PMREMGenerator(this.renderer);
+      this.reflection = pmrem.fromEquirectangular(this.skyMap); this.scene.environment = this.reflection.texture; pmrem.dispose();
+    }
+    this.scene.fog = new THREE.Fog(LIGHT_LOOKS[this.period].fog, 4800, 26000);
   }
 
   private buildLights(): void {
-    const hemi = new THREE.HemisphereLight(0xe8f2fb, 0x4a5744, 1.25);
+    const look = LIGHT_LOOKS[this.period], evening = this.period !== "day";
+    const hemi = new THREE.HemisphereLight(evening ? 0xa9c4e7 : 0xd8eafa, 0x596249, look.skyLight);
     this.scene.add(hemi);
 
-    const sun = new THREE.DirectionalLight(0xfff2d8, 2.8);
-    sun.position.set(1300, 1150, 1500);
+    const sun = new THREE.DirectionalLight(look.sun, look.sunlight);
+    sun.position.set(900, evening ? 600 : 1700, 1300); this.sunOffset.copy(sun.position); this.sun = sun;
     sun.castShadow = this.shadows;
-    sun.shadow.mapSize.set(2048, 2048);
+    sun.shadow.mapSize.set(this.quality === "high" ? 4096 : 2048, this.quality === "high" ? 4096 : 2048);
     const cam = sun.shadow.camera as THREE.OrthographicCamera;
     cam.left = -1800;
     cam.right = 1800;
@@ -235,182 +124,45 @@ export class Scene3D {
     cam.bottom = -1800;
     cam.near = 100;
     cam.far = 6000;
-    sun.shadow.bias = -0.0005;
-    this.scene.add(sun);
+    sun.shadow.bias = -0.00015;
+    sun.shadow.normalBias = .12;
+    this.scene.add(sun, sun.target);
+    if (evening) {
+      for (const stand of this.world.idx.def.stands) {
+        const apronLight = new THREE.SpotLight(0xffe8c7, this.period === "night" ? 42000 : 7000, 260, Math.PI / 3, .6, 2);
+        apronLight.position.set(stand.pos.x - 55, 46, wz(550));
+        apronLight.target.position.set(stand.pos.x, 0, wz(475));
+        this.scene.add(apronLight, apronLight.target);
+      }
+    }
   }
 
   private buildAirport(): void {
-    const idx = this.world.idx;
-    const def = idx.def;
-
-    const grass = document.createElement("canvas");
-    grass.width = 128;
-    grass.height = 128;
-    const gctx = grass.getContext("2d")!;
-    gctx.fillStyle = "#4f6042";
-    gctx.fillRect(0, 0, 128, 128);
-    for (let i = 0; i < 2600; i++) {
-      const v = 0.82 + Math.random() * 0.36;
-      gctx.fillStyle = `rgba(${Math.round(70 * v)}, ${Math.round(88 * v)}, ${Math.round(56 * v)}, 0.55)`;
-      gctx.fillRect(Math.random() * 128, Math.random() * 128, 2, 2);
-    }
-    const grassTex = new THREE.CanvasTexture(grass);
-    grassTex.wrapS = grassTex.wrapT = THREE.RepeatWrapping;
-    grassTex.repeat.set(60, 60);
-    grassTex.colorSpace = THREE.SRGBColorSpace;
-    const ground = new THREE.Mesh(
-      new THREE.PlaneGeometry(24000, 24000),
-      new THREE.MeshStandardMaterial({ map: grassTex, roughness: 1 }),
-    );
-    ground.rotation.x = -Math.PI / 2;
-    ground.position.y = -0.2;
-    ground.receiveShadow = true;
-    this.scene.add(ground);
-
-    const asphalt = new THREE.MeshStandardMaterial({ color: 0x585d66, roughness: 0.95 });
-    const lineYellow = new THREE.MeshStandardMaterial({ color: 0xd8b03c, roughness: 0.7 });
-
-    // 跑道
-    const rwy = def.runways.find((r) => r.id === idx.runway.id)!;
-    const rwyMesh = new THREE.Mesh(
-      new THREE.PlaneGeometry(rwy.lengthM, rwy.widthM),
-      new THREE.MeshStandardMaterial({ map: runwayTexture(rwy.lengthM), roughness: 0.92 }),
-    );
-    rwyMesh.rotation.x = -Math.PI / 2;
-    rwyMesh.position.set((rwy.threshold.x + rwy.end.x) / 2, 0.05, wz((rwy.threshold.y + rwy.end.y) / 2));
-    rwyMesh.receiveShadow = true;
-    this.scene.add(rwyMesh);
-
-    // 滑行道
-    for (const e of def.edges) {
-      const a = idx.nodes.get(e.a);
-      const b = idx.nodes.get(e.b);
-      if (!a || !b) continue;
-      const dx = b.pos.x - a.pos.x;
-      const dy = b.pos.y - a.pos.y;
-      const len = Math.hypot(dx, dy);
-      if (len < 1) continue;
-      const ang = Math.atan2(dx, dy);
-      const slab = new THREE.Mesh(new THREE.PlaneGeometry(18, len), asphalt);
-      slab.rotation.x = -Math.PI / 2;
-      slab.rotation.z = -ang;
-      slab.position.set((a.pos.x + b.pos.x) / 2, 0.04, wz((a.pos.y + b.pos.y) / 2));
-      slab.receiveShadow = true;
-      this.scene.add(slab);
-
-      const line = new THREE.Mesh(new THREE.PlaneGeometry(1.1, len), lineYellow);
-      line.rotation.x = -Math.PI / 2;
-      line.rotation.z = -ang;
-      line.position.set((a.pos.x + b.pos.x) / 2, 0.08, wz((a.pos.y + b.pos.y) / 2));
-      this.scene.add(line);
-    }
-
-    // 机坪
-    const xs = def.stands.map((s) => s.pos.x);
-    const minX = Math.min(...xs) - 70;
-    const maxX = Math.max(...xs) + 70;
-    const apron = new THREE.Mesh(new THREE.PlaneGeometry(maxX - minX, 200), asphalt);
-    apron.rotation.x = -Math.PI / 2;
-    apron.position.set((minX + maxX) / 2, 0.03, wz(330));
-    apron.receiveShadow = true;
-    this.scene.add(apron);
-
-    for (const s of def.stands) {
-      const mark = new THREE.Mesh(new THREE.PlaneGeometry(1.2, 40), lineYellow);
-      mark.rotation.x = -Math.PI / 2;
-      mark.position.set(s.pos.x, 0.09, wz(s.pos.y - 10));
-      this.scene.add(mark);
-    }
-
-    // 航站楼
-    const termW = maxX - minX + 80;
-    const terminal = new THREE.Mesh(
-      new THREE.BoxGeometry(termW, 16, 70),
-      new THREE.MeshStandardMaterial({ color: 0x59616d, roughness: 0.8 }),
-    );
-    terminal.position.set((minX + maxX) / 2, 8, wz(505));
-    terminal.castShadow = true;
-    terminal.receiveShadow = true;
-    this.scene.add(terminal);
-
-    const glass = new THREE.Mesh(
-      new THREE.BoxGeometry(termW - 20, 6, 2),
-      new THREE.MeshStandardMaterial({ color: 0x9fc6d8, roughness: 0.2, metalness: 0.5 }),
-    );
-    glass.position.set((minX + maxX) / 2, 9, wz(469));
-    this.scene.add(glass);
-
-    // 廊桥
-    for (const s of def.stands) {
-      const bridge = new THREE.Mesh(
-        new THREE.BoxGeometry(4, 4, 60),
-        new THREE.MeshStandardMaterial({ color: 0x6d7582, roughness: 0.85 }),
-      );
-      bridge.position.set(s.pos.x, 4, wz(s.pos.y + 60));
-      bridge.castShadow = true;
-      this.scene.add(bridge);
-    }
-
-    // 北侧机库与油罐（给画面一点纵深，不参与玩法）
-    const hangarMat = new THREE.MeshStandardMaterial({ color: 0x7d858f, roughness: 0.85 });
-    for (let i = 0; i < 3; i++) {
-      const h = new THREE.Mesh(new THREE.BoxGeometry(90, 20, 60), hangarMat);
-      h.position.set(-700 + i * 130, 10, wz(-260));
-      h.castShadow = true;
-      h.receiveShadow = true;
-      this.scene.add(h);
-      const roof = new THREE.Mesh(
-        new THREE.CylinderGeometry(1, 1, 60, 2, 1, false, 0, Math.PI),
-        new THREE.MeshStandardMaterial({ color: 0x5f6873, roughness: 0.9 }),
-      );
-      roof.rotation.z = Math.PI / 2;
-      roof.rotation.y = Math.PI / 2;
-      roof.scale.set(45, 12, 1);
-      roof.position.set(-700 + i * 130, 20, wz(-260));
-      this.scene.add(roof);
-    }
-    // 塔台
-    const tw = def.tower;
-    const shaft = new THREE.Mesh(
-      new THREE.CylinderGeometry(5, 7, tw.heightM, 12),
-      new THREE.MeshStandardMaterial({ color: 0xb9bfc7, roughness: 0.8 }),
-    );
-    shaft.position.set(tw.pos.x, tw.heightM / 2, wz(tw.pos.y));
-    shaft.castShadow = true;
-    this.scene.add(shaft);
-
-    const cab = new THREE.Mesh(
-      new THREE.CylinderGeometry(9, 8, 6, 12),
-      new THREE.MeshStandardMaterial({ color: 0x8fb6c9, roughness: 0.2, metalness: 0.4 }),
-    );
-    cab.position.set(tw.pos.x, tw.heightM + 3, wz(tw.pos.y));
-    cab.castShadow = true;
-    this.scene.add(cab);
-
-    const roof = new THREE.Mesh(
-      new THREE.CylinderGeometry(10, 10, 1.2, 12),
-      new THREE.MeshStandardMaterial({ color: 0x4d5561, roughness: 0.9 }),
-    );
-    roof.position.set(tw.pos.x, tw.heightM + 6.5, wz(tw.pos.y));
-    this.scene.add(roof);
+    this.scene.add(buildAirportModel(this.world.idx, this.period, this.shadows && this.quality !== "low"));
   }
 
   setView(view: ViewMode): void {
     this.view = view;
+    this.camera.up.set(0, 1, 0);
+    this.controls.enableRotate = view !== "top";
+    this.controls.mouseButtons.LEFT = view === "top" ? THREE.MOUSE.PAN : THREE.MOUSE.ROTATE;
+    this.controls.touches.ONE = view === "top" ? THREE.TOUCH.PAN : THREE.TOUCH.ROTATE;
     if (view === "tower") {
       this.controls.enabled = true;
-      this.camera.position.set(640, 285, wz(-770));
-      this.controls.target.set(280, 0, wz(120));
+      this.camera.position.set(1450, 930, 1250);
+      this.controls.target.set(-80, 0, wz(210));
     } else if (view === "top") {
       this.controls.enabled = true;
-      this.camera.position.set(520, 900, wz(1250));
-      this.controls.target.set(-40, 0, wz(120));
+      this.camera.up.set(0, 0, -1);
+      this.camera.position.set(0, 3000, wz(250));
+      this.controls.target.set(0, 0, wz(250));
     } else {
       this.controls.enabled = true;
       const ac = this.followId ? this.world.aircraft.get(this.followId) : null;
       if (ac) {
         const p = new THREE.Vector3(wx(ac.pos.x), Math.max(0, ac.altM - this.world.idx.def.elevationM), wz(ac.pos.y));
-        this.camera.position.copy(p).add(this.chaseOffset(ac.hdg));
+        p.y += 4;
+        this.camera.position.copy(p).add(this.chaseOffset(ac.hdg, ac.lengthM));
         this.controls.target.copy(p);
         this.lastFollowId = ac.id;
       }
@@ -423,22 +175,27 @@ export class Scene3D {
     if (this.view === "follow") this.setView("follow");
   }
 
-  private chaseOffset(hdg: number): THREE.Vector3 {
+  private chaseOffset(hdg: number, length = 40): THREE.Vector3 {
     const r = (hdg * Math.PI) / 180;
     const fwd = new THREE.Vector3(Math.sin(r), 0, -Math.cos(r));
-    return fwd.multiplyScalar(-190).add(new THREE.Vector3(0, 62, 0));
+    const side = new THREE.Vector3(Math.cos(r), 0, Math.sin(r));
+    const scale = THREE.MathUtils.clamp(length / 40, .8, 1.75);
+    return fwd.multiplyScalar(-78 * scale).addScaledVector(side, 58 * scale).add(new THREE.Vector3(0, 29 * scale, 0));
   }
 
   private resize(): void {
     const w = this.el.clientWidth;
     const h = this.el.clientHeight;
     if (w === 0 || h === 0) return;
+    if (w === this.renderWidth && h === this.renderHeight) return;
+    this.renderWidth = w; this.renderHeight = h;
     this.renderer.setSize(w, h);
     this.camera.aspect = w / h;
     this.camera.updateProjectionMatrix();
   }
 
   private handleClick(e: MouseEvent): void {
+    if (Math.hypot(e.clientX - this.pointerStart.x, e.clientY - this.pointerStart.y) > 5) return;
     const rect = this.renderer.domElement.getBoundingClientRect();
     const ndc = new THREE.Vector2(
       ((e.clientX - rect.left) / rect.width) * 2 - 1,
@@ -458,6 +215,7 @@ export class Scene3D {
 
   update(world: World, dtReal: number, view: ViewMode, selected: string | null, follow: string | null): void {
     this.world = world;
+    this.environment.update(world);
     this.followId = follow ?? selected;
 
     const alive = new Set<string>();
@@ -480,7 +238,9 @@ export class Scene3D {
       mesh.position.set(wx(ac.pos.x), groundY, wz(ac.pos.y));
       mesh.rotation.y = ((90 - ac.hdg) * Math.PI) / 180;
       const isSel = ac.id === selected;
-      mesh.scale.setScalar(isSel ? 1.06 : 1);
+      mesh.scale.setScalar(1);
+      updateAircraftModel(mesh, ac, dtReal, world.idx.def.elevationM, world.time);
+      void isSel;
     }
 
     for (const [id, mesh] of this.meshes) {
@@ -507,16 +267,45 @@ export class Scene3D {
       const ac = world.aircraft.get(this.followId);
       if (ac && ac.id !== this.lastFollowId) {
         const p = new THREE.Vector3(wx(ac.pos.x), Math.max(0, ac.altM - world.idx.def.elevationM), wz(ac.pos.y));
-        this.camera.position.copy(p).add(this.chaseOffset(ac.hdg));
+        p.y += 4;
+        this.camera.position.copy(p).add(this.chaseOffset(ac.hdg, ac.lengthM));
         this.controls.target.copy(p);
         this.lastFollowId = ac.id;
       }
       if (ac) {
         const p = new THREE.Vector3(wx(ac.pos.x), Math.max(0, ac.altM - world.idx.def.elevationM), wz(ac.pos.y));
+        p.y += 4;
         const delta = p.clone().sub(this.controls.target);
         this.controls.target.copy(p);
         this.camera.position.add(delta);
       }
+    } else if (view === "follow" && !this.followId && this.lastFollowId) {
+      this.lastFollowId = null; this.setView("tower"); this.view = "follow";
+    }
+
+    this.routeRefresh += dtReal;
+    const selectedAc = selected ? world.aircraft.get(selected) : null;
+    this.halo.visible = !!selectedAc && selectedAc.altM - world.idx.def.elevationM < 5;
+    if (selectedAc) { this.halo.position.set(selectedAc.pos.x, .35, -selectedAc.pos.y); this.halo.scale.setScalar(Math.max(.85, selectedAc.lengthM / 40)); }
+    if (this.sun && this.shadows) {
+      const local = selectedAc && selectedAc.altM - world.idx.def.elevationM < 150;
+      const radius = local ? 300 : 1800, target = this.sun.target.position;
+      target.set(local ? Math.round(selectedAc.pos.x / 4) * 4 : 0, 0, local ? -Math.round(selectedAc.pos.y / 4) * 4 : 0);
+      this.sun.position.copy(target).add(this.sunOffset);
+      if (radius !== this.shadowRadius) {
+        this.shadowRadius = radius; const camera = this.sun.shadow.camera;
+        camera.left = camera.bottom = -radius; camera.right = camera.top = radius; camera.updateProjectionMatrix();
+      }
+    }
+    if (this.routeRefresh > .1) {
+      this.routeRefresh = 0;
+      const attribute = this.routeLine.geometry.getAttribute("position") as THREE.BufferAttribute;
+      let count = 0;
+      if (selectedAc?.route) {
+        const route = selectedAc.route, remaining = Math.max(0, route.total - route.minS), samples = Math.min(255, Math.ceil(remaining / 120));
+        for (let i = 0; i <= samples; i++) { const point = route.pointAt(route.minS + remaining * i / Math.max(1, samples)); attribute.setXYZ(count++, point.x, Math.max(.6, selectedAc.altM - world.idx.def.elevationM - 15), -point.y); }
+      }
+      this.routeLine.geometry.setDrawRange(0, count); attribute.needsUpdate = true;
     }
 
     this.controls.update();
@@ -530,7 +319,10 @@ export class Scene3D {
     const h = this.el.clientHeight;
     const seen = new Set<string>();
 
-    for (const ac of world.aircraft.values()) {
+    const occupied: { x: number; y: number; width: number }[] = [];
+    const conflicts = new Set(world.conflicts.flatMap((pair) => pair.split("|")));
+    const aircraft = [...world.aircraft.values()].sort((a, b) => Number(b.id === selected) - Number(a.id === selected) || Number(conflicts.has(b.id)) - Number(conflicts.has(a.id)));
+    for (const ac of aircraft) {
       seen.add(ac.id);
       let el = this.labelEls.get(ac.id);
       if (!el) {
@@ -544,16 +336,25 @@ export class Scene3D {
         this.labels.appendChild(el);
         this.labelEls.set(ac.id, el);
       }
-      this.tmp.set(wx(ac.pos.x), Math.max(0, ac.altM - world.idx.def.elevationM) + 8, wz(ac.pos.y));
+      this.tmp.set(wx(ac.pos.x), Math.max(0, ac.altM - world.idx.def.elevationM) + (ac.lengthM > 60 ? 18 : 12), wz(ac.pos.y));
       this.tmp.project(this.camera);
-      if (this.tmp.z > 1 || this.tmp.x < -0.98 || this.tmp.x > 0.98 || this.tmp.y < -0.98 || this.tmp.y > 0.98) {
+      if (this.tmp.z > 1 || this.tmp.z < -1 || this.tmp.x < -0.98 || this.tmp.x > 0.98 || this.tmp.y < -0.98 || this.tmp.y > 0.98) {
         el.style.display = "none";
         continue;
       }
-      el.style.display = "block";
-      el.style.transform = `translate(-50%, -100%) translate(${((this.tmp.x + 1) / 2) * w}px, ${((1 - this.tmp.y) / 2) * h}px)`;
-      const conflict =
-        world.conflicts.some((c) => c.split("|").includes(ac.id)) || ac.phase === "landing";
+      const conflict = conflicts.has(ac.id), important = ac.id === selected || conflict, width = important ? 150 : 80;
+      const x = THREE.MathUtils.clamp(((this.tmp.x + 1) / 2) * w, width / 2 + 5, w - width / 2 - 5), anchorY = ((1 - this.tmp.y) / 2) * h;
+      let y = anchorY, found = false;
+      for (const offset of [0, 28, 56]) {
+        const candidate = anchorY - offset;
+        if (candidate < 22 || candidate > h - 4) continue;
+        if (occupied.some((box) => Math.abs(box.x - x) < (box.width + width) / 2 + 6 && Math.abs(box.y - candidate) < 26)) continue;
+        y = candidate; found = true; break;
+      }
+      if (!found && !important) { el.style.display = "none"; continue; }
+      occupied.push({ x, y, width });
+      el.style.display = "flex"; el.style.setProperty("--leader-height", `${8 + Math.max(0, anchorY - y)}px`);
+      el.style.transform = `translate(-50%, -100%) translate(${x}px, ${y}px)`;
       el.className = `ac-label${ac.id === selected ? " sel" : ""}${conflict ? " conflict" : ""}`;
       const cs = el.firstElementChild as HTMLElement;
       const meta = el.lastElementChild as HTMLElement;
@@ -571,21 +372,34 @@ export class Scene3D {
     }
   }
 
-  start(): void {
-    const loop = (t: number) => {
-      this.raf = requestAnimationFrame(loop);
-      this.lastTime = t;
-    };
-    this.raf = requestAnimationFrame(loop);
-  }
-
   dispose(): void {
-    cancelAnimationFrame(this.raf);
+    if (this.disposed) return;
+    this.disposed = true;
     this.resizeObs.disconnect();
+    if (this.resizeFrame !== null) cancelAnimationFrame(this.resizeFrame);
     this.renderer.domElement.removeEventListener("click", this.boundClick);
+    this.renderer.domElement.removeEventListener("pointerdown", this.boundPointerDown);
     this.controls.dispose();
+    const geometries = new Set<THREE.BufferGeometry>();
+    const materials = new Set<THREE.Material>();
+    const textures = new Set<THREE.Texture>();
+    this.scene.traverse((obj) => {
+      if (!(obj instanceof THREE.Mesh) && !(obj instanceof THREE.Line) && !(obj instanceof THREE.Points)) return;
+      geometries.add(obj.geometry);
+      for (const material of Array.isArray(obj.material) ? obj.material : [obj.material]) {
+        materials.add(material);
+        for (const value of Object.values(material)) if (value instanceof THREE.Texture) textures.add(value);
+      }
+    });
+    geometries.forEach((g) => g.dispose());
+    textures.forEach((t) => t.dispose());
+    this.skyMap?.dispose(); this.reflection?.dispose();
+    materials.forEach((m) => m.dispose());
+    this.labelEls.forEach((el) => el.remove());
+    this.labelEls.clear();
+    this.meshes.clear();
     this.renderer.dispose();
-    this.el.removeChild(this.renderer.domElement);
-    void this.lastTime;
+    this.renderer.forceContextLoss();
+    this.renderer.domElement.remove();
   }
 }

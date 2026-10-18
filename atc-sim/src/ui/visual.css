@@ -1,0 +1,43 @@
+/* Visual sample: one readable scene, restrained chrome, tools available on demand. */
+:root { --side-width:248px; --bg:#0c1821; --accent:#afe5d2; }
+.app { background:radial-gradient(ellipse at 50% 30%,#1b303c,#0b1720 75%); }
+.in-session .stage { border-color:#6e8d965c; box-shadow:0 12px 36px #0003; }
+.panel { border-color:#829fa827; box-shadow:0 4px 18px #0002; }
+.panel-title { background:linear-gradient(100deg,#213843,#182d38); color:#d1dfe1; }
+.row .cs { font-size:13px; }.row.sel { background:#284849; box-shadow:inset 2px 0 var(--accent); }
+.strip { padding:10px 16px; background:linear-gradient(115deg,#18313c,#102630); box-shadow:0 6px 26px #0004; }
+.strip-info { padding-bottom:6px; }.strip-head b { font-size:18px; }.command-workflow { margin-top:6px; }
+.ac-label { padding:4px 7px; border:1px solid #8aa7ad55; border-radius:4px; background:rgba(18,35,44,.82); color:#d8e5e4; box-shadow:0 2px 5px #0003; font-size:10px; }
+.ac-label .cs { color:#d8e5e4; font-weight:500; }.ac-label:not(.sel):not(.conflict) .meta { display:none; }
+.ac-label.sel { background:rgba(21,53,56,.95); border-color:#b7e4d3; box-shadow:0 0 0 1px #b7e4d31a,0 3px 9px #0003; }
+.ac-label.sel .cs { color:#e3f8ee; }.ac-label.sel .meta { color:#b1d4cf; }
+.ac-label::after { content:""; position:absolute; top:100%; left:50%; height:var(--leader-height,8px); border-left:1px solid #c9e3dc66; pointer-events:none; }
+.ac-label.conflict { background:#633d2e; border-color:#e9b47b; }
+.scene-caption { color:#e8f0ef; text-shadow:0 1px 3px #0a1a24,0 1px 7px #0a1a24; }
+.scene-caption>span:last-child { color:#e0e9e8; }
+.scene-tools { display:none; }
+@media(min-width:761px) {
+  .focus-mode { --side-width:224px; }
+  .focus-mode .stage,.focus-mode .labels { left:12px; }
+  .focus-mode .scene-caption { left:26px; right:calc(var(--side-width) + 38px); }
+  .focus-mode .operations { left:26px; right:calc(var(--side-width) + 37px); }
+  .focus-mode .workbench { display:none; }
+  .focus-mode .workspace-window[data-window="flights"] { display:contents !important; }
+  .focus-mode .workspace-window[data-window="flights"]>.flights { position:absolute; inset:auto; top:calc(var(--bar-height) + 12px); right:12px; width:var(--side-width); height:auto; max-height:calc(100vh - var(--bar-height) - 40px); }
+  .focus-mode.has-selection .workspace-window[data-window="flights"]>.flights { max-height:calc(100vh - var(--bar-height) - var(--command-height,196px) - 36px); }
+  .focus-mode .scene-tools { position:absolute; display:flex; align-items:center; gap:5px; left:26px; bottom:130px; z-index:6; padding:5px; border:1px solid #8caaa74d; border-radius:7px; background:rgba(13,31,40,.92); box-shadow:0 3px 14px #0002; }
+  .focus-mode.has-selection .scene-tools { bottom:calc(var(--command-height,196px) + 40px); }
+  .scene-tools button { font-size:11px; min-height:30px; padding:5px 12px; background:transparent; border-color:transparent; color:#d3e6e2; }
+  .scene-tools button.on { background:#2d514f; border-color:#9ac5b066; }.scene-tools>span { font-size:9px; color:#9ab4bd; padding:0 7px; }
+  .focus-ground .workbench,.focus-radar .workbench,.focus-radio .workbench { display:block; top:calc(var(--bar-height) + 130px); left:26px; width:285px; bottom:auto; z-index:7; }
+  .focus-mode .workbench .workspace-window { display:none; }
+  .focus-ground .workspace-window[data-window="ground"],.focus-radar .workspace-window[data-window="radar"],.focus-radio .workspace-window[data-window="radio"] { display:block; position:static !important; width:auto !important; height:auto !important; }
+  .focus-mode .workbench .panel { position:relative; height:auto; max-height:calc(100vh - var(--bar-height) - var(--command-height,196px) - 195px); overflow:auto; }
+  .focus-mode .workbench .ground-svg { height:180px; }.focus-mode .workbench .radar svg { height:230px; }.focus-mode .workbench .radio { height:225px; }
+  .focus-mode>.shift-goals { left:12px; }
+  .focus-mode.review-mode .scene-tools { bottom:calc(var(--command-height,196px) + 40px); }
+}
+@media(min-width:1600px) { :root { --side-width:272px; }.focus-mode { --side-width:240px; } }
+@media(max-width:1380px) { .top-brand { display:none; } }
+@media(max-width:1100px) { :root { --side-width:224px; } }
+@media(max-width:760px) { .focus-button,.scene-tools { display:none !important; }.strip { padding:10px 12px; }.ac-label { font-size:9px; } }
