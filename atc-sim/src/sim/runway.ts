@@ -35,6 +35,15 @@ export interface DepartureWindowEstimate extends DepartureWindow {
   marginSec: number;
 }
 
+/**
+ * 空速 → 跑道方向上的地速。`Aircraft.gs` 已经是地速（含风），
+ * 所以任何拿"真空速/进近速度"做下限的地方都必须先做这一步转换，不能直接在结果上再加一次风。
+ */
+export function groundSpeedFor(env: SimEnv, airspeedMps: number, headingDeg = env.idx.runway.hdg): number {
+  const wind = kt(env.windKt) * Math.cos((env.windDirDeg + 180 - headingDeg) * Math.PI / 180);
+  return Math.max(0, airspeedMps + wind);
+}
+
 /** The same conservative margins used by permissions, also exposed when the window is positive. */
 export function departureWindowEstimates(env: SimEnv, ac: Aircraft): DepartureWindowEstimate[] {
   if (ac.kind !== "dep" || ac.phase !== "hold_short" && ac.phase !== "lineup") return [];
@@ -43,7 +52,7 @@ export function departureWindowEstimates(env: SimEnv, ac: Aircraft): DepartureWi
   return env.aircraftList().filter((other) => other.id !== ac.id && other.kind === "arr" && other.phase === "approach")
     .map((other) => {
       const arrivalInSec = approachRunwayETA(env, other);
-      const arrivalSpeed = Math.max(other.gs, kt(getType(other.typeId).vappKt)) + kt(env.windKt);
+      const arrivalSpeed = Math.max(other.gs, groundSpeedFor(env, kt(getType(other.typeId).vappKt)));
       const bufferSec = nm(2) / Math.max(1, arrivalSpeed) + 5;
       const requiredSec = preparationSec + releaseSec + bufferSec;
       return { aircraftId: other.id, callsign: other.callsign, arrivalInSec, requiredSec, preparationSec, releaseSec, bufferSec, marginSec: arrivalInSec - requiredSec };
@@ -57,14 +66,13 @@ export function departurePreparationSec(env: SimEnv, ac: Aircraft): number {
     : ac.phase === "takeoff" ? 0
       : lineupRoute(env, ac).total;
   const lineup = lineDistance / kt(8) + (lineDistance > 0 ? Math.max(0, kt(8) - ac.gs) / .8 / 2 + 2 : 0);
-  const wind = kt(env.windKt) * Math.cos((env.windDirDeg + 180 - env.idx.runway.hdg) * Math.PI / 180);
-  const rotation = Math.max(0, kt(getType(ac.typeId).rotationKt) + wind - (ac.phase === "takeoff" ? ac.gs : 0)) / kt(3.6);
+  const rotation = Math.max(0, groundSpeedFor(env, kt(getType(ac.typeId).rotationKt)) - (ac.phase === "takeoff" ? ac.gs : 0)) / kt(3.6);
   return lineup + rotation + (ac.pendingClearance ? Math.max(0, ac.pendingClearance.commitAt - env.time) : 7);
 }
 
-/** Earliest plausible threshold arrival at the present approach speed, including tailwind. */
+/** Earliest plausible threshold arrival: 当前地速与该机型进近速度（换算成地速）取大。 */
 export function approachRunwayETA(env: SimEnv, ac: Aircraft): number {
-  const speed = Math.max(ac.gs, kt(getType(ac.typeId).vappKt)) + kt(env.windKt);
+  const speed = Math.max(ac.gs, groundSpeedFor(env, kt(getType(ac.typeId).vappKt)));
   return distanceToThreshold(env.idx, ac.pos) / Math.max(1, speed);
 }
 
