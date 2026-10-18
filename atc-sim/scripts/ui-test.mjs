@@ -1,8 +1,9 @@
 import assert from "node:assert/strict";
 import { existsSync, mkdirSync } from "node:fs";
 import puppeteer from "puppeteer-core";
+import { testBase } from "./test-base.mjs";
 
-const base = process.argv[2] ?? "http://localhost:5173";
+const base = testBase;
 const executablePath = [
   process.env.CHROME_PATH,
   "C:/Program Files/Google/Chrome/Application/chrome.exe",

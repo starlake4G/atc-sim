@@ -9,6 +9,7 @@ import { ReplayPlayer } from "../src/sim/replay";
 import { makeGroundRoute, makeRoute } from "../src/sim/route";
 import { runwayErrorReason, runwayTraffic, runwayWarning } from "../src/sim/runway";
 import { TIME_SCALE, World } from "../src/sim/world";
+import { botTick } from "../src/sim/bot";
 import { ft, kt, angleDiff } from "../src/sim/units";
 import { dist } from "../src/sim/vec";
 import { confirmed } from "./test-radio";
@@ -55,6 +56,24 @@ test("预览复飞和移交不改变世界、评分、计划或快照", () => {
   assert(previewCommand(w, a, { kind: "goAround" }).ok); assert(previewCommand(w, a, { kind: "handoff", controller: "TWR" }).ok === false);
   assert.deepEqual(w.snapshot(), before);
 });
+test("任意可用指令的预览都不改变世界（泛化断言）", () => {
+  for (const safety of ["guarded", "consequence"] as const) {
+    const w = new World(getLevel("operating-windows"), { mode: "standard", safetyMode: safety });
+    for (let t = 0; t < 900 && w.status === "running"; t++) { w.step(); if (t % 20 === 0) botTick(w); }
+    let checked = 0;
+    for (const ac of w.aircraftList()) {
+      for (const option of w.commandOptions(ac)) {
+        const before = JSON.stringify(w.snapshot());
+        previewCommand(w, ac, option.command);
+        const after = JSON.stringify(w.snapshot());
+        assert.equal(after, before, `${safety}/${ac.callsign}/${option.key} 的预览改动了世界`);
+        checked += 1;
+      }
+    }
+    assert(checked >= 5, `${safety} 下只覆盖到 ${checked} 条指令，断言没有意义`);
+  }
+});
+
 test("确认前风险变化会重新校验，失败指令不会执行", () => {
   const w = fixture("guarded"), a = ready(w); assert(w.issue(a.id, { kind: "takeoff" }).ok);
   w.lastRunwayUse = { callsign: "HEAVY", typeId: "B77W", at: w.time };

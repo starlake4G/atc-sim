@@ -1,7 +1,8 @@
 import assert from "node:assert/strict";
 import { existsSync, mkdirSync } from "node:fs";
 import puppeteer from "puppeteer-core";
-const base = process.argv[2] ?? "http://localhost:5174";
+import { testBase } from "./test-base.mjs";
+const base = testBase;
 const executablePath = [process.env.CHROME_PATH, "C:/Program Files/Google/Chrome/Application/chrome.exe", "C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe"].find((p) => p && existsSync(p));
 const browser = await puppeteer.launch({ executablePath, headless: true, args: ["--enable-unsafe-swiftshader", "--disable-gpu"], defaultViewport: { width: 1440, height: 900 } });
 const page = await browser.newPage(), errors = [];
