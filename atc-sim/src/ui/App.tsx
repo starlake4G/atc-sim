@@ -3,7 +3,7 @@ import { DEFAULT_LEVEL_ID, LEVELS, getLevel } from "../data/levels";
 import { rateShift } from "../sim/scoring";
 import { botTick } from "../sim/bot";
 import { CHALLENGE_ID, DEFAULT_CHALLENGE_SEED, createChallenge, normalizeChallengeSeed } from "../sim/challenge";
-import type { Command, ControlMode, SimState } from "../sim/types";
+import type { Command, ControlMode, SafetyMode, SimState } from "../sim/types";
 import { TIME_SCALE, TICK, World } from "../sim/world";
 import { Scene3D, type ViewMode } from "../views/scene3d";
 import { GroundMap, Radar, RouteEditor, selectedAircraft } from "./maps";
@@ -37,6 +37,7 @@ export default function App() {
   const [review, setReview] = useState<ReplayPlayer | null>(null);
   const [reviewPlaying, setReviewPlaying] = useState(false);
   const [sound, setSound] = useState(false);
+  const [safetyMode, setSafetyMode] = useState<SafetyMode>(() => { try { return localStorage.getItem("kestrel.safety") === "guarded" ? "guarded" : "consequence"; } catch { return "consequence"; } });
   const [quality, setQuality] = useState<"low" | "balanced" | "high">(() => { try { const saved = localStorage.getItem("kestrel.quality"); return saved === "low" || saved === "high" ? saved : "balanced"; } catch { return "balanced"; } });
   const [toastTone, setToastTone] = useState("info");
   const [compactPane, setCompactPane] = useState<string | null>("flights");
@@ -69,7 +70,7 @@ export default function App() {
   function start(id: string) {
     const level = id === CHALLENGE_ID ? createChallenge(challengeSeed) : getLevel(id);
     if (level.seed) setChallengeSeed(level.seed);
-    const world = new World(level, { mode }); world.step();
+    const world = new World(level, { mode, safetyMode }); world.step();
     setCompactPane(innerWidth <= 760 && level.lesson ? null : "flights");
     setFocusPane(null);
     setReview(null); reviewRef.current = null; setReviewPlaying(false); playedRadio.current = 0;
@@ -86,7 +87,7 @@ export default function App() {
     const level = id === CHALLENGE_ID ? createChallenge(q.get("seed")) : template;
     if (level.seed) setChallengeSeed(level.seed);
     const debugMode = q.get("mode") === "standard" ? "standard" : "assisted";
-    const world = new World(level, { mode: debugMode });
+    const world = new World(level, { mode: debugMode, safetyMode: q.get("safety") === "guarded" ? "guarded" : safetyMode });
     const raw = Number(q.get("fast") ?? "0");
     const fast = Number.isFinite(raw) ? Math.max(0, Math.min(raw, level.durationMin * 60)) : 0;
     for (let i = 0; i < fast / TICK && world.status === "running"; i++) { world.step(); if (q.get("bot") === "1" && i % 20 === 0) botTick(world); }
@@ -203,7 +204,7 @@ export default function App() {
     const ac = world.aircraft.get(world.selectedId); if (!ac) return;
     const result = world.issue(ac.id, command);
     if (!result.ok) { showToast(result.reason, "danger"); audio.current?.play("alert"); }
-    else { showToast(`${ac.callsign} · ${result.radio}`, "success"); audio.current?.play("command"); }
+    else { showToast(`${ac.callsign} · 已发送，等待复诵${result.warning ? ` · ⚠ ${result.warning}` : ""}`, result.warning ? "warning" : "success"); audio.current?.play("command"); }
     setSnap(world.snapshot());
   }
   function changePlan(id: string, action: PlanAction) {
@@ -266,7 +267,7 @@ export default function App() {
 
   return <div ref={appRef} className={`app ${session ? "in-session" : "in-menu"} ${review ? "review-mode" : ""} ${selected || review ? "has-selection" : ""} ${focused ? "focus-mode" : ""} focus-${focusPane ?? "none"} compact-${compactPane ?? "none"}`}><div className="stage" ref={stageRef} /><div className="labels" ref={labelsRef} />
     {session && snap && world && <>
-      <TopBar snap={snap} paused={review ? !reviewPlaying : paused} speed={speed} view={view} onPause={() => review ? setReviewPlaying((value) => !value) : setPaused((value) => !value)} onSpeed={setSpeed} onView={(value) => { setView(value); sceneRef.current?.setView(value); }} onBack={backToMenu} onHelp={openHelp} editing={layoutEditing} onLayout={() => { setFocused(false); setFocusPane(null); setLayoutEditing((value) => !value); }} onReset={() => { setLayoutEditing(false); setLayoutReset((value) => value + 1); }} onAdvance={advance} canAdvance={!review && snap.status === "running" && decisionFlights(world).length === 0} sound={sound} onSound={() => void toggleSound()} quality={({ low: "节能", balanced: "均衡", high: "精细" })[quality]} onQuality={changeQuality} focused={focused} onFocus={() => { setFocused((value) => !value); setFocusPane(null); setLayoutEditing(false); }} />
+      <TopBar readOnly={!!review} onSafety={() => { const nextMode: SafetyMode = world.safetyMode === "guarded" ? "consequence" : "guarded"; if (world.setSafetyMode(nextMode).ok) { setSafetyMode(nextMode); try { localStorage.setItem("kestrel.safety", nextMode); } catch {} setSnap(world.snapshot()); } }} snap={snap} paused={review ? !reviewPlaying : paused} speed={speed} view={view} onPause={() => review ? setReviewPlaying((value) => !value) : setPaused((value) => !value)} onSpeed={setSpeed} onView={(value) => { setView(value); sceneRef.current?.setView(value); }} onBack={backToMenu} onHelp={openHelp} editing={layoutEditing} onLayout={() => { setFocused(false); setFocusPane(null); setLayoutEditing((value) => !value); }} onReset={() => { setLayoutEditing(false); setLayoutReset((value) => value + 1); }} onAdvance={advance} canAdvance={!review && snap.status === "running" && decisionFlights(world).length === 0} sound={sound} onSound={() => void toggleSound()} quality={({ low: "节能", balanced: "均衡", high: "精细" })[quality]} onQuality={changeQuality} focused={focused} onFocus={() => { setFocused((value) => !value); setFocusPane(null); setLayoutEditing(false); }} />
       <div className="scene-caption"><span className="live-dot" />{review ? "REPLAY" : "LIVE"} / {view === "follow" && !selected ? "选机后跟随" : ({ tower: "机场总览", follow: "航班跟随", top: "地面态势" })[view]}<span>KEKS · {world.level.name}</span></div>
       {focused && <div className="scene-tools" aria-label="场景工具">{[["ground", "地面"], ["radar", "雷达"], ["radio", "无线电"]].map(([id, label]) => <button key={id} className={focusPane === id ? "on" : ""} aria-expanded={focusPane === id} onClick={() => setFocusPane((value) => value === id ? null : id!)}>{label}</button>)}<span>V 恢复工作台</span></div>}
       <Operations world={world} snap={snap} onPick={pick} onPlan={review ? () => {} : openPlan} onInspect={startInspection} readOnly={!!review} focusToken={operationFocus} /><WorkspaceWindow id="flights" editing={layoutEditing} resetToken={layoutReset}><FlightList world={world} snap={snap} onPick={pick} /></WorkspaceWindow>
@@ -283,7 +284,7 @@ export default function App() {
       {helpOpen && <Help onClose={closeOverlay} />}
       {planOpen && <RunwayPlan world={session.world} snap={snap} onClose={closeOverlay} onPick={pick} onChange={changePlan} onReorder={reorderPlan} />}
       {review && <ReplayTransport record={review.record} time={snap.time} playing={reviewPlaying} onPlay={() => { if (review.ended) seekReview(0); setReviewPlaying((value) => !value); }} onSeek={seekReview} onClose={closeReview} />}
-      {!review && snap.status === "finished" && <Result world={session.world} snap={snap} onRestart={() => start(levelId)} onMenu={backToMenu} onNext={next ? () => start(next.id) : undefined} onReplay={beginReview} onExport={exportReview} />}
+      {!review && snap.status !== "running" && <Result world={session.world} snap={snap} onRestart={() => start(levelId)} onMenu={backToMenu} onNext={next && snap.status !== "failed" ? () => start(next.id) : undefined} onReplay={beginReview} onExport={exportReview} />}
     </>}
     {!session && <StartScreen levelId={levelId} mode={mode} records={records} seed={challengeSeed} onSeed={setChallengeSeed} onNewSeed={() => setChallengeSeed(`KEKS-${crypto.getRandomValues(new Uint32Array(1))[0]!.toString(36).toUpperCase()}`)} onNormalizeSeed={() => setChallengeSeed(normalizeChallengeSeed(challengeSeed))} onPick={setLevelId} onMode={setMode} onStart={() => start(levelId)} />}
     {toast && <div className={`toast ${toastTone}`} role={toastTone === "danger" ? "alert" : "status"}>{toast}</div>}

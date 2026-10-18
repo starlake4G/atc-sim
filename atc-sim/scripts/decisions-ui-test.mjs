@@ -22,7 +22,7 @@ async function capture() {
 }
 mkdirSync(".tmp", { recursive: true });
 try {
-  await page.goto(`${base}/?level=intersection&mode=standard&fast=65&paused=1&lite=1`); await wait(".plan-open"); await capture();
+  await page.goto(`${base}/?level=intersection&mode=standard&safety=guarded&fast=65&paused=1&lite=1`); await wait(".plan-open"); await capture();
   await page.click(".plan-open"); await wait(".plan-modal");
   for (let i = 0; i < 3; i++) await page.click('.plan-candidate button[aria-label$="加入计划"]');
   const originalOrder = await order(), before = await page.evaluate(() => JSON.stringify(window.testWorld.exportReplay()));
@@ -36,7 +36,7 @@ try {
   assert(reproduced); console.log("✓ 真实班次原生试排不改变顺序/记录，采用只写一次改序，回放一致");
 
   // Isolated, paused scenario used to expose the heavy/light timing tradeoff in the actual UI.
-  await page.goto(`${base}/?level=ground-school&mode=standard&paused=1&lite=1`); await wait(".plan-open"); await capture();
+  await page.goto(`${base}/?level=ground-school&mode=standard&safety=guarded&paused=1&lite=1`); await wait(".plan-open"); await capture();
   await page.evaluate(async () => {
     const { spawnDeparture } = await import("/src/sim/aircraft.ts"), w = window.testWorld; w.aircraft.clear(); w.select(null); w.time = 500;
     for (const [id, typeId, standId] of [["heavy", "B77W", "S1"], ["light", "AT72", "S5"]]) {
@@ -88,11 +88,13 @@ try {
   await page.evaluate(() => { window.testWorld.aircraft.get("arr").pos = { x: 4000, y: 0 }; }); await page.waitForFunction(() => Number(document.querySelector(".departure-opportunity").dataset.margin) < 0);
   assert.match(await page.$eval(".guidance", (el) => el.textContent), /起飞窗口需/); assert(await page.$$eval(".strip .cmd", (buttons) => buttons.some((button) => button.textContent.includes("可以起飞") && button.disabled)));
   await page.evaluate(() => { window.testWorld.aircraft.get("arr").pos = { x: 19000, y: 0 }; }); await wait(".recommended-command");
-  const commandCount = await page.evaluate(() => window.testWorld.exportReplay().actions.length); await page.click(".recommended-command"); await page.waitForFunction(() => document.querySelector(".opportunity-heading b").textContent.includes("执行中"));
+  const commandCount = await page.evaluate(() => window.testWorld.exportReplay().actions.length); await page.click(".recommended-command"); await wait(".clearance-progress");
+  await page.evaluate(() => { const w = window.testWorld; while (w.aircraft.get("light").pendingClearance) w.step(); });
+  await page.waitForFunction(() => document.querySelector(".opportunity-heading b")?.textContent.includes("执行中"));
   await page.evaluate(() => document.activeElement?.blur()); await page.keyboard.press("e"); assert.equal(await page.evaluate(() => window.testWorld.exportReplay().actions.length), commandCount + 1);
   console.log("✓ 正负余量与真实许可一致，计算含爬升和缓冲，展开详情不挡许可，已许可不重复提示");
 
-  await page.goto(`${base}/?level=operating-windows&mode=standard&fast=715&bot=1&paused=1&lite=1`); await wait(".flights"); await clickText(".flights .row", "OPS204"); await wait(".departure-opportunity");
+  await page.goto(`${base}/?level=operating-windows&mode=standard&safety=guarded&fast=715&bot=1&paused=1&lite=1`); await wait(".flights"); await clickText(".flights .row", "OPS204"); await wait(".departure-opportunity");
   assert(await page.$eval(".departure-opportunity", (el) => Number(el.dataset.margin) > 0 && el.dataset.blocked === "true")); assert.match(await page.$eval(".guidance", (el) => el.textContent), /侧风.*恢复/);
   assert(await page.$$eval(".strip .cmd", (buttons) => buttons.some((button) => button.textContent.includes("可以起飞") && button.disabled)));
   await page.setViewport({ width: 390, height: 844 }); await settle(); await page.screenshot({ path: ".tmp/decisions-wind-mobile.png" });

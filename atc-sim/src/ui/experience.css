@@ -28,7 +28,7 @@
 .workbench.with-selection { bottom:216px; }
 .workbench .ground-svg { height:118px; }.workbench .radar svg { height:168px; }
 .ground-svg { background:#102832; }
-.map-taxi { stroke:#527583; }.map-taxi.bypass { stroke:#73988f; }
+.map-taxi { stroke:#527583; }
 .map-caption { fill:#b4c7ce; font-size:8px; }
 .radar { background:#0d252e; }.radar-ring { stroke:#40616b; }.radar-axis { stroke:#35555f; }
 .radar-fix { fill:#809fa8; font-size:8px; }.radar-aircraft { font-size:11px; }.radar-aircraft .radar-alt { font-size:8.7px; fill:#b6ccd0; }
@@ -159,3 +159,13 @@ kbd { border:1px solid #65828855; background:#5a81801a; color:var(--muted); bord
 @media(max-width:760px) { .plan-row { grid-template-columns:minmax(0,1fr); }.plan-flight,.plan-times,.plan-reason,.plan-controls { grid-column:1/-1; }.plan-controls { justify-content:flex-end; }.plan-times { justify-content:space-between; }.comparison-heading b { flex:1; min-width:0; }.plan-rows { max-height:40vh; } }
 @media(max-height:760px) and (min-width:761px) { .operation-body { max-height:190px; }.scenario-operations { margin-top:7px; }.scenario-operations p { font-size:8px; }.scenario-detail:has(.scenario-operations) .airport-preview { height:96px; } }
 @media(max-width:760px) { .cards { max-height:min(36vh,290px); }.operation-board { max-width:none; }.operation-body { max-height:170px; }.operation-item p { font-size:10px; }.operation-heading { min-height:34px; }.operation-review>div { flex-wrap:wrap; gap:6px; }.operation-review strong { flex-basis:100%; }.operations:has(.operation-board) .weather { display:flex; font-size:9px; }.scenario-operations { margin-top:7px; } }
+.clearance-progress,.handoff-pending { padding:9px 12px; border:1px solid #365d67; border-radius:6px; background:#132b34; color:#c4e1e2; font-size:12px; }
+.clearance-progress { display:grid; grid-template-columns:1fr auto; gap:5px 12px; }
+.clearance-progress progress { grid-column:1 / -1; width:100%; height:4px; accent-color:#86d1bd; }
+.handoff-pending { margin-top:5px; color:#a6d9cb; }
+.radio-live { padding:7px 9px; background:#19323b; display:grid; grid-template-columns:1fr auto; gap:4px; font-size:10px; }
+.radio-live progress { grid-column:1 / -1; width:100%; height:3px; accent-color:#93d3c4; }
+.guidance.warning,.cmd.warning { color:#f0ce8b; border-color:#816b42; }
+.cmd.warning:not(:disabled) { background:#342e1f; }
+.toast.warning { color:#f4d28d; border-color:#94723f; background:#352c20; }
+@media (max-width:760px) { .clearance-progress { grid-template-columns:1fr; }.clearance-progress span { font-size:11px; }.safety-toggle { flex-shrink:0; } }

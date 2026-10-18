@@ -2,16 +2,17 @@ import { alongRunway, distanceToThreshold, findTaxiPath, usableExit } from "./ai
 import type { SimEnv } from "./env";
 import { goAround, isAirborne, routeViaFix } from "./aircraft";
 import { makeRoute } from "./route";
-import { taxiRoute } from "./ground";
+import { taxiRoute, lineupRoute, pushbackRoute } from "./ground";
 import { fromBearing } from "./vec";
-import { runwayBlockReason } from "./runway";
+import { permissionError, runwayWarning } from "./runway";
+import { completeHandoff } from "./radio";
 import type { Aircraft, Command, CommandOption, CommandResult, Seat } from "./types";
 import { ft, kt, norm360, toFt } from "./units";
 
 const pad3 = (n: number) => String(Math.round(norm360(n))).padStart(3, "0");
 
 /** 情境化指令条：选项就是管制用语，按飞机当前状态生成 */
-export function availableCommands(ac: Aircraft, env: SimEnv): CommandOption[] {
+function phaseCommands(ac: Aircraft, env: SimEnv): CommandOption[] {
   const out: CommandOption[] = [];
   const idx = env.idx;
   const distThr = distanceToThreshold(idx, ac.pos);
@@ -22,7 +23,6 @@ export function availableCommands(ac: Aircraft, env: SimEnv): CommandOption[] {
       return [{ key: "contact-gnd", label: "联系地面 121.7", group: "移交", command: { kind: "handoff", controller: "GND" }, tone: "primary" }];
     }
     out.push({ key: "taxi-main", label: ac.kind === "dep" ? "经 B 滑行至跑道外" : `经 A 滑入机位 ${ac.standId ?? "待分配"}`, group: "滑行", command: { kind: "taxi", route: "main" }, tone: "primary", disabledReason: ac.kind === "arr" && !ac.standId ? "等待兼容的空闲机位" : undefined });
-    if (ac.kind === "dep") out.push({ key: "taxi-bypass", label: "经 B、C 旁通道滑行", group: "滑行", command: { kind: "taxi", route: "bypass" } });
     return out;
   }
 
@@ -51,13 +51,13 @@ export function availableCommands(ac: Aircraft, env: SimEnv): CommandOption[] {
 
   if (ac.phase === "hold_short") {
     if (env.mode === "standard" && ac.controller !== "TWR") return [{ key: "contact-twr", label: "联系塔台 118.1", group: "移交", command: { kind: "handoff", controller: "TWR" }, tone: "primary" }];
-    out.push({ key: "lineup", label: "进跑道等待", group: "跑道", command: { kind: "lineup" }, disabledReason: runwayBlockReason(env, ac) });
-    out.push({ key: "takeoff", label: "可以起飞", group: "跑道", command: { kind: "takeoff" }, tone: "primary", disabledReason: runwayBlockReason(env, ac) });
+    out.push({ key: "lineup", label: "进跑道等待", group: "跑道", command: { kind: "lineup" }, disabledReason: permissionError(env, ac), warning: runwayWarning(env, ac) });
+    out.push({ key: "takeoff", label: "可以起飞", group: "跑道", command: { kind: "takeoff" }, tone: "primary", disabledReason: permissionError(env, ac), warning: runwayWarning(env, ac) });
     return out;
   }
 
   if (ac.phase === "lineup") {
-    out.push({ key: "takeoff", label: "可以起飞", group: "跑道", command: { kind: "takeoff" }, tone: "primary", disabledReason: runwayBlockReason(env, ac) });
+    out.push({ key: "takeoff", label: "可以起飞", group: "跑道", command: { kind: "takeoff" }, tone: "primary", disabledReason: permissionError(env, ac), warning: runwayWarning(env, ac) });
     return out;
   }
 
@@ -70,12 +70,12 @@ export function availableCommands(ac: Aircraft, env: SimEnv): CommandOption[] {
 
   if (ac.phase === "approach" && ac.approach) {
     if (env.mode === "standard" && ac.controller !== "TWR") {
-      out.push({ key: "contact-twr", label: "联系塔台 118.1", group: "移交", command: { kind: "handoff", controller: "TWR" }, tone: "primary", disabledReason: ac.approach.established ? undefined : "等待建立进近" });
+      out.push({ key: "contact-twr", label: "联系塔台 118.1", group: "移交", command: { kind: "handoff", controller: "TWR" }, tone: "primary" });
       out.push({ key: "goaround", label: "执行复飞", group: "进近", command: { kind: "goAround" }, tone: "danger" });
       return out;
     }
     if (!ac.landCleared) {
-      out.push({ key: "land", label: `跑道 ${idx.runway.id}，可以落地`, group: "跑道", command: { kind: "land" }, tone: "primary", disabledReason: !ac.approach.established ? "等待建立进近" : runwayBlockReason(env, ac) });
+      out.push({ key: "land", label: `跑道 ${idx.runway.id}，可以落地`, group: "跑道", command: { kind: "land" }, tone: "primary", disabledReason: !ac.approach.established ? "等待建立进近" : permissionError(env, ac), warning: runwayWarning(env, ac) });
     } else {
       out.push({ key: "cancel-land", label: "取消落地许可", group: "跑道", command: { kind: "cancelLanding" } });
     }
@@ -86,7 +86,6 @@ export function availableCommands(ac: Aircraft, env: SimEnv): CommandOption[] {
   }
 
   if (isAirborne(ac)) {
-    if (ac.phase === "departure" && env.mode === "standard") out.push({ key: "contact-dep", label: "移交离场 124.6", group: "移交", command: { kind: "handoff", controller: "DEP" }, tone: "primary", disabledReason: ac.altM - idx.def.elevationM < ft(1500) ? "爬升至 1500 ft 以上再移交" : undefined });
     out.push({ key: "left30", label: "左转 30°", group: "引导", command: { kind: "heading", hdg: norm360(ac.hdg - 30) } });
     out.push({ key: "right30", label: "右转 30°", group: "引导", command: { kind: "heading", hdg: norm360(ac.hdg + 30) } });
 
@@ -126,6 +125,23 @@ export function availableCommands(ac: Aircraft, env: SimEnv): CommandOption[] {
   return out;
 }
 
+export function availableCommands(ac: Aircraft, env: SimEnv): CommandOption[] {
+  const out = phaseCommands(ac, env);
+  if (env.mode === "standard" && ac.controller !== "DEP") {
+    if (ac.kind === "dep" && ac.phase === "taxi_out" && ac.controller === "GND") out.push({ key: "contact-twr", label: "预联系塔台 118.1", group: "移交", command: { kind: "handoff", controller: "TWR" } });
+    if (ac.kind === "dep" && ac.controller === "TWR" && ["hold_short", "lineup", "takeoff", "departure"].includes(ac.phase)) out.push({ key: "contact-dep", label: ac.phase === "departure" ? "移交离场 124.6" : "预移交离场 124.6", group: "移交", command: { kind: "handoff", controller: "DEP" }, tone: "primary" });
+    if (ac.kind === "arr" && ac.controller !== "GND" && ["landing", "taxi_in"].includes(ac.phase)) out.push({ key: "contact-gnd", label: "联系地面 121.7", group: "移交", command: { kind: "handoff", controller: "GND" } });
+  }
+  return out.map((option) => ({ ...option, disabledReason: ac.pendingClearance ? "无线电通话中，等待复诵确认" : option.command.kind === "handoff" && ac.pendingHandoff ? "移交已确认，等待生效条件" : option.disabledReason }));
+}
+
+/** Validate against an isolated aircraft and side-effect-free world facade. */
+export function previewCommand(env: SimEnv, ac: Aircraft, cmd: Command): CommandResult {
+  const noop = () => {};
+  const preview = Object.assign(Object.create(env) as SimEnv, { say: noop, notify: noop, countLanding: noop, countTakeoff: noop, countGoAround: noop, countService: noop, countHandoff: noop, addViolation: noop, occupyRunway: noop, vacateRunway: noop, finish: noop, failShift: noop, groundLocks: new Map(env.groundLocks) });
+  return executeCommand(preview, { ...ac, pos: { ...ac.pos }, approach: ac.approach ? { ...ac.approach } : null, scored: { ...ac.scored } }, cmd);
+}
+
 function reject(reason: string): CommandResult {
   return { ok: false, reason };
 }
@@ -134,6 +150,7 @@ function reject(reason: string): CommandResult {
 export function executeCommand(env: SimEnv, ac: Aircraft, cmd: Command): CommandResult {
   const idx = env.idx;
   const rwy = idx.runway.id;
+  const warning = ["land", "lineup", "takeoff"].includes(cmd.kind) ? runwayWarning(env, ac) : undefined;
   if (ac.controller === "DEP") return reject("航班已移交离场，不再接受本席指令");
 
   if (cmd.kind === "heading" || cmd.kind === "pushback") {
@@ -194,10 +211,10 @@ export function executeCommand(env: SimEnv, ac: Aircraft, cmd: Command): Command
     case "land": {
       if (env.mode === "standard" && ac.controller !== "TWR") return reject("先联系塔台，再下达落地许可");
       if (ac.phase !== "approach" || !ac.approach?.established) return reject("还没建立进近");
-      const reason = runwayBlockReason(env, ac);
+      const reason = permissionError(env, ac);
       if (reason) return reject(reason);
       ac.landCleared = true;
-      return { ok: true, seat: "TWR", radio: `跑道 ${rwy}，可以落地` };
+      return { ok: true, seat: "TWR", radio: `跑道 ${rwy}，可以落地`, warning };
     }
 
     case "cancelLanding": {
@@ -215,31 +232,30 @@ export function executeCommand(env: SimEnv, ac: Aircraft, cmd: Command): Command
     case "lineup": {
       if (env.mode === "standard" && ac.controller !== "TWR") return reject("先联系塔台");
       if (ac.phase !== "hold_short") return reject("飞机不在跑道外等待点");
-      const reason = runwayBlockReason(env, ac);
+      const reason = permissionError(env, ac);
       if (reason) return reject(reason);
       ac.phase = "lineup";
-      ac.route = makeRoute([ac.pos, idx.nodes.get(idx.lineupNode)!.pos]);
+      ac.route = lineupRoute(env, ac);
       env.occupyRunway(ac);
-      return { ok: true, seat: "TWR", radio: `跑道 ${rwy}，进跑道等待` };
+      return { ok: true, seat: "TWR", radio: `跑道 ${rwy}，进跑道等待`, warning };
     }
 
     case "takeoff": {
       if (env.mode === "standard" && ac.controller !== "TWR") return reject("先联系塔台");
       if (ac.phase !== "hold_short" && ac.phase !== "lineup") return reject("飞机还没到跑道外等待点");
-      const reason = runwayBlockReason(env, ac);
+      const reason = permissionError(env, ac);
       if (reason) return reject(reason);
       env.occupyRunway(ac);
       ac.takeoffPending = true;
       if (ac.phase === "hold_short") {
         ac.phase = "lineup";
-        ac.route = makeRoute([ac.pos, idx.nodes.get(idx.lineupNode)!.pos]);
-        return { ok: true, seat: "TWR", radio: `跑道 ${rwy}，可以起飞` };
+        ac.route = lineupRoute(env, ac);
+        return { ok: true, seat: "TWR", radio: `跑道 ${rwy}，可以起飞`, warning };
       }
       if (ac.route === null) {
         ac.phase = "takeoff";
-        ac.gs = Math.max(ac.gs, 2);
       }
-      return { ok: true, seat: "TWR", radio: `跑道 ${rwy}，可以起飞` };
+      return { ok: true, seat: "TWR", radio: `跑道 ${rwy}，可以起飞`, warning };
     }
 
     case "pushback": {
@@ -251,7 +267,7 @@ export function executeCommand(env: SimEnv, ac: Aircraft, cmd: Command): Command
       const path = findTaxiPath(idx, stand.node, env.mode === "standard" ? apron?.to ?? stand.node : idx.holdingNode, "dep");
       if (!path) return reject("机位与滑行道不连通");
       ac.phase = "pushback";
-      ac.route = makeRoute([ac.pos, ...path.map((id) => idx.nodes.get(id)!.pos)]);
+      ac.route = pushbackRoute(ac, idx.nodes.get(apron?.to ?? stand.node)!.pos, cmd.hdg);
       ac.clearedHdg = cmd.hdg;
       ac.gs = 0;
       return { ok: true, seat: "GND", radio: `可以推出，机头朝${compass(cmd.hdg)}` };
@@ -266,16 +282,19 @@ export function executeCommand(env: SimEnv, ac: Aircraft, cmd: Command): Command
       ac.route = route; ac.holding = false; ac.blockedBy = null;
       ac.phase = ac.kind === "dep" ? "taxi_out" : "taxi_in";
       ac.groundGoal = ac.kind === "dep" ? "runway" : "stand";
-      return { ok: true, seat: "GND", radio: ac.kind === "dep" ? `沿 ${cmd.route === "main" ? "B" : "B、C"} 滑行，跑道 ${rwy} 外等待` : `沿 A 滑入机位 ${ac.standId}` };
+      return { ok: true, seat: "GND", radio: ac.kind === "dep" ? `沿 B 滑行，跑道 ${rwy} 外等待` : `沿 A 滑入机位 ${ac.standId}` };
     }
 
     case "handoff": {
-      const valid = cmd.controller === "TWR" ? ac.phase === "hold_short" || ac.phase === "approach" && ac.approach?.established :
-        cmd.controller === "GND" ? ac.kind === "arr" && ac.phase === "taxi_ready" && env.runwayOccupantId !== ac.id :
-        cmd.controller === "DEP" ? ac.phase === "departure" && ac.altM - idx.def.elevationM >= ft(1500) : false;
+      const sourceSeat = ac.controller;
+      if (ac.pendingHandoff) return reject("移交已确认，等待生效条件");
+      const valid = cmd.controller === "TWR" ? ac.kind === "dep" && ["taxi_out", "hold_short"].includes(ac.phase) || ac.phase === "approach" :
+        cmd.controller === "GND" ? ac.kind === "arr" && ["landing", "taxi_in", "taxi_ready"].includes(ac.phase) :
+        cmd.controller === "DEP" ? ac.kind === "dep" && ac.controller === "TWR" && ["hold_short", "lineup", "takeoff", "departure"].includes(ac.phase) : false;
       if (!valid || ac.controller === cmd.controller) return reject("当前阶段不满足移交条件");
-      ac.controller = cmd.controller; env.countHandoff(ac);
-      return { ok: true, seat: cmd.controller === "DEP" ? "APP" : cmd.controller, radio: `联系${cmd.controller === "GND" ? "地面 121.7" : cmd.controller === "DEP" ? "离场 124.6" : "塔台 118.1"}` };
+      ac.pendingHandoff = { controller: cmd.controller, confirmedAt: env.time };
+      completeHandoff(ac, env);
+      return { ok: true, seat: sourceSeat, radio: `联系${cmd.controller === "GND" ? "地面 121.7" : cmd.controller === "DEP" ? "离场 124.6" : "塔台 118.1"}` };
     }
 
     case "holdAir": {
@@ -353,7 +372,7 @@ export function readbackText(ac: Aircraft, cmd: Command): string {
     case "exit":
       return `脱离，${cs}`;
     case "taxi": return `按许可路线滑行，${cs}`;
-    case "handoff": return `联系 ${cmd.controller}，${cs}`;
+    case "handoff": return `联系${cmd.controller === "GND" ? "地面 121.7" : cmd.controller === "DEP" ? "离场 124.6" : "塔台 118.1"}，${cs}`;
     case "holdAir": return `右转等待，${cs}`;
   }
 }

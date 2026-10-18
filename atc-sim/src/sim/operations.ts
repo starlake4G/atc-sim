@@ -3,6 +3,12 @@ import type { SimEnv } from "./env";
 import type { Aircraft, LevelDef, OperationDef, OperationState, WeatherDef } from "./types";
 import type { PlanChangeResult } from "./planning";
 
+/** Shared by the rendered vehicle and collision detection. */
+export function inspectionVehiclePose(event: OperationState, time: number) {
+  const progress = Math.max(0, Math.min(1, (time - event.startedAt!) / event.durationSec));
+  return { x: 1000 - (progress < .5 ? progress * 2 : 2 - progress * 2) * 2000, y: -6, hdg: progress < .5 ? 270 : 90 };
+}
+
 /** Game limits, chosen for readable differences between light, medium and heavy aircraft. */
 export function windLimits(typeId: string) {
   return { crosswindKt: getType(typeId).wake === "L" ? 15 : getType(typeId).wake === "H" ? 28 : 24, tailwindKt: 10 };
@@ -55,7 +61,7 @@ export class OperationsManager {
   }
   private begin(env: SimEnv, state: OperationState): void {
     state.stage = "active"; state.startedAt = env.time; state.endsAt = env.time + state.durationSec;
-    this.change(env, state, `跑道检查开始，暂停新起降许可，预计 ${Math.ceil(state.durationSec)} 游戏秒后开放`);
+    this.change(env, state, `跑道检查开始，${env.safetyMode === "consequence" ? "新许可提示检查风险" : "暂停新起降许可"}，预计 ${Math.ceil(state.durationSec)} 游戏秒后开放`);
   }
 
   update(env: SimEnv): void {

@@ -148,14 +148,15 @@ try {
   await waitCommand("经 B 滑行至跑道外");
   await clickText(".strip button", "规划滑行路线");
   await wait(".route-modal");
-  await page.click('.map-node[aria-label="经过 C3"]');
-  assert.match(await page.$eval(".route-string", (el) => el.textContent), /C3/);
+  await page.click('.map-node[aria-label="经过 B3"]');
+  assert.match(await page.$eval(".route-string", (el) => el.textContent), /B3/);
   await page.screenshot({ path: ".tmp/route-editor.png" });
   await page.click(".route-modal .primary");
   await waitCommand("联系塔台");
   await clickText(".strip button", "联系塔台");
   await waitCommand("进跑道等待");
   await clickText(".strip button", "进跑道等待");
+  await waitCommand("可以起飞");
   await clickText(".strip button", "可以起飞");
   await waitCommand("移交离场");
   await clickText(".strip button", "移交离场");
@@ -164,7 +165,7 @@ try {
   assert.equal(await page.$eval(".grade", (el) => el.textContent), "S");
   assert.match(await page.$eval(".review-events", (el) => el.textContent), /移交 DEP/);
   assert.equal(await page.evaluate(() => JSON.parse(localStorage.getItem("kestrel.records.v2"))["ground-school:standard"].grade), "S");
-  console.log("✓ 手动离场：推出、地图节点规划 C、确认滑行、移交塔台、对正起飞、移交离场及成绩保存");
+  console.log("✓ 手动离场：推出、地图节点规划 B、确认滑行、移交塔台、对正起飞、移交离场及成绩保存");
 
   await page.goto(`${base}/?level=tutorial&mode=standard&fast=80&lite=1`);
   await wait(".flights .row");

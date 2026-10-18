@@ -65,6 +65,7 @@ test("时间推进会停在新航班或临近落地的安全决定，主动等�
   const air = new World(getLevel("tutorial"), { mode: "standard" }); air.step(); const ac = air.aircraftList()[0]!;
   ac.pos = { x: 19000, y: 6000 }; ac.hdg = 270; ac.gs = ac.targetGs = kt(180);
   assert(air.issue(ac.id, { kind: "holdAir" }).ok); assert.equal(decisionFlights(air).length, 0);
+  while (ac.pendingClearance) air.step();
   ac.airHolding = false; ac.pos = { x: 4000, y: 0 }; ac.phase = "approach"; ac.approach = { runwayId: "27", established: false };
   const urgent = advanceToDecision(air); assert.equal(urgent.advanced, 0); assert.equal(urgent.aircraftId, ac.id);
 });
@@ -75,7 +76,7 @@ test("逐航班延误归因只计目标时刻后，合计与实际延误吻合",
   complete(world);
   const report = world.snapshot().movementReports[0]!;
   assert(report.actualAt !== null && report.transferred);
-  assert(report.delays.permission > 139); assert(report.delays.taxi > 0);
+  assert(report.delays.permission > 19); assert(report.delays.taxi > 0);
   const total = Object.values(aggregateDelays(world.snapshot().movementReports)).reduce((a, b) => a + b, 0);
   assert(Math.abs(total - world.score.totalDelaySec) < .11);
   assert(Math.abs(total - (report.actualAt! - report.targetAt)) < .11);

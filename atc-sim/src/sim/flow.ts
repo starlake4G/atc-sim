@@ -5,7 +5,7 @@ import type { World } from "./world";
 /** Only explicit workflow permissions; speed and vectors remain player choices. */
 export function recommendedCommand(world: World, ac: Aircraft): CommandOption | null {
   if (world.status !== "running") return null;
-  const choices = world.commandOptions(ac).filter((option) => !option.disabledReason);
+  const choices = world.commandOptions(ac).filter((option) => !option.disabledReason && !option.warning);
   const key = ac.airHolding ? "direct-iaf" : ac.phase === "parked" ? "push-180" :
     ac.phase === "taxi_ready" ? choices.some((option) => option.key === "contact-gnd") ? "contact-gnd" : "taxi-main" :
     ac.phase === "hold_short" ? choices.some((option) => option.key === "contact-twr") ? "contact-twr" : "takeoff" :
@@ -16,9 +16,9 @@ export function recommendedCommand(world: World, ac: Aircraft): CommandOption | 
 }
 
 export function decisionFlights(world: World): Aircraft[] {
-  return world.aircraftList().filter((ac) => !ac.airHolding && !ac.holding && recommendedCommand(world, ac) ||
+  return world.aircraftList().filter((ac) => !ac.pendingClearance && (!ac.airHolding && !ac.holding && recommendedCommand(world, ac) ||
     ac.phase === "approach" && !ac.landCleared && distanceToThreshold(world.idx, ac.pos) < 4000 ||
-    world.conflicts.some((pair) => pair.split("|").includes(ac.id)))
+    world.conflicts.some((pair) => pair.split("|").includes(ac.id))))
     .sort((a, b) => Number(b.phase === "approach") - Number(a.phase === "approach") || a.scheduledMovementAt - b.scheduledMovementAt);
 }
 

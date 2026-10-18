@@ -95,8 +95,8 @@ export function pickExit(idx: AirportIndex, sAlongM: number, gs: number): { name
 }
 
 export function usableExit(ex: { atM: number; highSpeed: boolean }, along: number, gs: number): boolean {
-  const exitSpeed = kt(ex.highSpeed ? 20 : 12);
-  const brakingDistance = Math.max(0, (gs * gs - exitSpeed * exitSpeed) / (2 * 2.2));
+  const exitSpeed = kt(12);
+  const brakingDistance = Math.max(0, (gs * gs - exitSpeed * exitSpeed) / (2 * 2.2)) + (gs > kt(20) ? gs * 1.5 : 0);
   return ex.atM >= along - 2 && ex.atM - along + 2 >= brakingDistance;
 }
 
@@ -117,7 +117,7 @@ export function distanceToThreshold(idx: AirportIndex, pos: Vec2): number {
 /** 三度下滑道在该位置应处的高度（米）。距入口越远越高。 */
 export function glideAltM(idx: AirportIndex, pos: Vec2): number {
   const beforeThreshold = -alongRunway(idx, pos);
-  return idx.def.elevationM + Math.max(0, beforeThreshold) * GLIDE_SLOPE;
+  return idx.def.elevationM + (beforeThreshold >= 0 ? 15 + beforeThreshold * GLIDE_SLOPE : 15 * Math.max(0, 1 + beforeThreshold / 250) ** 2);
 }
 
 export function nodePos(idx: AirportIndex, id: string): Vec2 {

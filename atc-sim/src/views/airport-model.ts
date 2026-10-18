@@ -3,6 +3,7 @@ import { mergeGeometries } from "three/examples/jsm/utils/BufferGeometryUtils.js
 import type { AirportIndex } from "../sim/airport";
 import { pavementMaterial, projectPavementUV, rubberMarks, terminalGlassMaterial } from "./surface-textures";
 import type { LightPeriod } from "./lighting";
+import { groundEdgePoints } from "../sim/ground";
 
 export function buildAirportModel(idx: AirportIndex, period: LightPeriod = "day", detailed = true): THREE.Group {
   const root = new THREE.Group();
@@ -68,10 +69,26 @@ export function buildAirportModel(idx: AirportIndex, period: LightPeriod = "day"
     const rubber = rubberMarks(); rubber.position.x = side * 810; root.add(rubber);
   }
   const drawn = new Set<string>();
+  function ribbon(points: { x: number; y: number }[], width: number, material: THREE.Material, height: number) {
+    const vertices: number[] = [], indices: number[] = [];
+    points.forEach((p, i) => {
+      const a = points[Math.max(0, i - 1)]!, b = points[Math.min(points.length - 1, i + 1)]!;
+      const length = Math.hypot(b.x - a.x, b.y - a.y) || 1;
+      const nx = -(b.y - a.y) / length * width / 2, ny = (b.x - a.x) / length * width / 2;
+      vertices.push(p.x + nx, height, -p.y - ny, p.x - nx, height, -p.y + ny);
+      if (i) { const k = i * 2; indices.push(k - 2, k - 1, k, k - 1, k + 1, k); }
+    });
+    const geometry = new THREE.BufferGeometry(); geometry.setAttribute("position", new THREE.Float32BufferAttribute(vertices, 3)); geometry.setAttribute("uv", new THREE.Float32BufferAttribute(new Float32Array(points.length * 4), 2)); geometry.setIndex(indices); geometry.computeVertexNormals();
+    const mesh = new THREE.Mesh(geometry, material); projectPavementUV(mesh); root.add(mesh);
+  }
   for (const edge of idx.def.edges) {
     const key = [edge.a, edge.b].sort().join("|"); if (drawn.has(key)) continue; drawn.add(key);
-    const a = idx.nodes.get(edge.a)!.pos, b = idx.nodes.get(edge.b)!.pos;
-    line(a, b, 25, concrete, .02); line(a, b, 21, asphalt, .06); line(a, b, .65, yellow, .12);
+    const points = groundEdgePoints({ idx }, edge.a, edge.b);
+    if (points.length > 2) { ribbon(points, 25, concrete, .04); ribbon(points, 21, asphalt, .08); ribbon(points, .65, yellow, .14); continue; }
+    for (let i = 1; i < points.length; i++) {
+      const a = points[i - 1]!, b = points[i]!;
+      line(a, b, 25, concrete, .02); line(a, b, 21, asphalt, .06); line(a, b, .65, yellow, .12);
+    }
   }
   box(1300, .035, 175, -200, .015, 450, concrete);
   // Texture slabs use an 8 m grid; a few repair strips break up the larger apron.
@@ -79,7 +96,7 @@ export function buildAirportModel(idx: AirportIndex, period: LightPeriod = "day"
 
   const signCanvasAtlas = document.createElement("canvas"); signCanvasAtlas.width = 1024; signCanvasAtlas.height = 640;
   const sg = signCanvasAtlas.getContext("2d")!;
-  const signTexts = [...idx.def.stands.map((s) => `GATE ${s.id.slice(1)}`), "← A · APRON", "B · RWY 27 →", "C · BYPASS →", "H27 | 27-09"];
+  const signTexts = [...idx.def.stands.map((s) => `GATE ${s.id.slice(1)}`), "← A · APRON", "B · RWY 27 →", "H27 | 27-09"];
   for (let i = 0; i < signTexts.length; i++) {
     const x = i % 2 * 512, y = Math.floor(i / 2) * 128;
     sg.fillStyle = i < 6 ? "#173b4c" : "#1b2225"; sg.fillRect(x, y, 512, 128);
@@ -147,9 +164,9 @@ export function buildAirportModel(idx: AirportIndex, period: LightPeriod = "day"
   const cab = new THREE.Mesh(new THREE.CylinderGeometry(12, 8, 7, 8), glass); cab.position.set(tw.pos.x, tw.heightM, -tw.pos.y); root.add(cab);
   box(25, 2, 25, tw.pos.x, tw.heightM + 4, tw.pos.y, metal);
   box(.6, 11, .6, tw.pos.x, tw.heightM + 10, tw.pos.y, white);
-  for (const [text, x, z] of [["A ←", -850, 150], ["B →", -850, 330], ["C →", 800, 250], ["H27", 1080, 145]] as const) label(text, x, z, 32, 10, "#f2ce67");
-  for (const [i, x, z] of [[6, -730, 174], [7, -550, 354], [8, 745, 273], [9, 1074, 178]]) {
-    board(i!, x!, 2.2, z!, i === 9 ? 8 : 10, 2.2);
+  for (const [text, x, z] of [["A ←", -850, 150], ["B →", -850, 330], ["H27", 1080, 145]] as const) label(text, x, z, 32, 10, "#f2ce67");
+  for (const [i, x, z] of [[6, -730, 174], [7, -550, 354], [8, 1074, 178]]) {
+    board(i!, x!, 2.2, z!, i === 8 ? 8 : 10, 2.2);
     box(.16, 1.5, .16, x! - 3, .8, z!, metal); box(.16, 1.5, .16, x! + 3, .8, z!, metal);
   }
   for (let i = 0; i < 4; i++) line({ x: 1075 + i * 2, y: 104 }, { x: 1100 + i * 2, y: 108 }, .75, yellow);
@@ -158,7 +175,6 @@ export function buildAirportModel(idx: AirportIndex, period: LightPeriod = "day"
   for (let x = -1190; x <= 1190; x += 60) for (const z of [-24, 24]) lamps.push({ x, z, color: "white" });
   for (let x = 1230; x <= 1650; x += 45) for (const z of [-4, 0, 4]) lamps.push({ x, z, color: "white" });
   for (let x = -1150; x <= 1150; x += 70) for (const z of [138, 162, 318, 342]) lamps.push({ x, z, color: "blue" });
-  for (let x = -1150; x <= 1090; x += 70) for (const z of [238, 262]) lamps.push({ x, z, color: "blue" });
   for (let z = -18; z <= 18; z += 4.5) { lamps.push({ x: 1195, z, color: "green" }); lamps.push({ x: -1195, z, color: "red" }); }
   const lampColors: Record<string, number> = { white: 0xffe6b3, blue: 0x419ce1, green: 0x63e6aa, red: 0xff7663 };
   for (const color of Object.keys(lampColors)) {

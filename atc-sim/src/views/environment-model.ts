@@ -1,5 +1,6 @@
 import * as THREE from "three";
 import type { World } from "../sim/world";
+import { inspectionVehiclePose } from "../sim/operations";
 
 /** Small animated scene cues; their positions are derived from fixed simulation time. */
 export class EnvironmentModel {
@@ -41,9 +42,9 @@ export class EnvironmentModel {
     const inspection = world.operations.snapshot().find((event) => event.kind === "inspection" && event.stage === "active");
     this.closure.visible = this.vehicle.visible = !!inspection;
     if (inspection) {
-      const progress = Math.min(1, (world.time - inspection.startedAt!) / inspection.durationSec);
-      this.vehicle.position.set(1000 - (progress < .5 ? progress * 2 : 2 - progress * 2) * 2000, .1, 6);
-      this.vehicle.rotation.y = progress < .5 ? Math.PI : 0;
+      const pose = inspectionVehiclePose(inspection, world.time);
+      this.vehicle.position.set(pose.x, .1, -pose.y);
+      this.vehicle.rotation.y = pose.hdg === 270 ? Math.PI : 0;
       this.beacon.visible = Math.floor(world.time * 3) % 2 === 0;
     }
   }

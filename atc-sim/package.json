@@ -16,13 +16,15 @@
     "experience:test": "tsx scripts/experience-test.ts",
     "operations:test": "tsx scripts/operations-test.ts",
     "decisions:test": "tsx scripts/decisions-test.ts",
+    "control:test": "tsx scripts/control-test.ts",
+    "control:ui:test": "node scripts/control-ui-test.mjs",
     "decisions:ui:test": "node scripts/decisions-ui-test.mjs",
     "operations:ui:test": "node scripts/operations-ui-test.mjs",
     "ui:test": "node scripts/ui-test.mjs",
     "planning:ui:test": "node scripts/planning-ui-test.mjs",
     "experience:ui:test": "node scripts/experience-ui-test.mjs",
     "visual:ui:test": "node scripts/visual-ui-test.mjs",
-    "accept": "npm run typecheck && npm run sim:test && npm run gameplay:test && npm run planning:test && npm run challenge:test && npm run edge:test && npm run experience:test && npm run operations:test && npm run decisions:test",
+    "accept": "npm run typecheck && npm run sim:test && npm run gameplay:test && npm run planning:test && npm run challenge:test && npm run edge:test && npm run experience:test && npm run operations:test && npm run decisions:test && npm run control:test",
     "shot": "node scripts/shot.mjs"
   },
   "dependencies": {

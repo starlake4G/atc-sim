@@ -2,29 +2,26 @@ import { getAirport } from "../data/airports";
 import { getType } from "../data/aircraft-types";
 import { buildAirport, distanceToThreshold, type AirportIndex } from "./airport";
 import { isAirborne, spawnArrival, spawnDeparture, stepAircraft } from "./aircraft";
-import { availableCommands, executeCommand, readbackText, seatOf } from "./commands";
+import { availableCommands, executeCommand, previewCommand, readbackText, seatOf } from "./commands";
+import { completeHandoff, transmissionSeconds } from "./radio";
+import { aircraftCollide, hitsGroundObstacle } from "./collision";
 import type { SimEnv } from "./env";
 import { Rng } from "./rng";
 import { challengeSeedHash } from "./challenge";
 import { makeRoute } from "./route";
 import { releaseGround } from "./ground";
 import { RunwayPlanner, type PlanChangeResult } from "./planning";
-import { runwayBlockReason, type RunwayUse } from "./runway";
+import { runwayBlockReason, runwayTraffic, type RunwayUse } from "./runway";
 import { delayReason, emptyDelays } from "./debrief";
 import type { JournalAction, PlanEdit, ReplayRecord } from "./journal";
-import type { Aircraft, Command, CommandOption, CommandResult, ControlMode, LevelDef, MovementReport, RadioLine, SimEvent, SimState } from "./types";
+import type { Aircraft, Command, CommandOption, CommandResult, ControlMode, LevelDef, MovementReport, RadioLine, SafetyMode, Seat, SimEvent, SimState } from "./types";
 import { dist, dot, sub } from "./vec";
 import { ft, nm } from "./units";
-import { OperationsManager } from "./operations";
+import { OperationsManager, inspectionVehiclePose } from "./operations";
 
 export const TICK = 0.1;
-/** 1 现实秒 = 6 游戏秒（1x）。班次 45 分钟 ≈ 7.5 现实分钟。 */
-export const TIME_SCALE = 6;
-
-interface PendingRadio {
-  at: number;
-  line: RadioLine;
-}
+/** 1× is real time. Faster controls and next-request skipping are explicit player choices. */
+export const TIME_SCALE = 1;
 
 export class World implements SimEnv {
   readonly level: LevelDef;
@@ -48,11 +45,14 @@ export class World implements SimEnv {
   alerts: SimState["alerts"] = [];
   selectedId: string | null = null;
   runwayOccupantId: string | null = null;
-  status: "running" | "finished" = "running";
+  status: "running" | "finished" | "failed" = "running";
+  safetyMode: SafetyMode;
+  failureReason: string | null = null;
+  private readonly initialSafetyMode: SafetyMode;
   score = { landings: 0, takeoffs: 0, violations: 0, goArounds: 0, points: 0, serviced: 0, totalDelaySec: 0, departuresTransferred: 0 };
   conflicts: string[] = [];
 
-  private pendingRadio: PendingRadio[] = [];
+  private channelAvailable = new Map<Seat, number>();
   private spawnedFlights = new Set<number>();
   private nextAircraftId = 1;
   private nextRadioId = 1;
@@ -61,7 +61,8 @@ export class World implements SimEnv {
   private recording: boolean;
   private reports = new Map<string, MovementReport>();
 
-  constructor(level: LevelDef, options: { mode?: ControlMode; recording?: boolean } = {}) {
+  constructor(level: LevelDef, options: { mode?: ControlMode; recording?: boolean; safetyMode?: SafetyMode } = {}) {
+    this.safetyMode = this.initialSafetyMode = options.safetyMode ?? "consequence";
     this.level = level;
     this.recording = options.recording !== false;
     this.idx = buildAirport(getAirport(level.airportId), level.runwayId);
@@ -70,7 +71,7 @@ export class World implements SimEnv {
       if (!Number.isFinite(flight.atMin) || flight.atMin < 0 || callsigns.has(flight.callsign)) throw new Error(`无效航班计划：${flight.callsign}`);
       callsigns.add(flight.callsign);
       this.reports.set(flight.callsign, { callsign: flight.callsign, aircraftId: null, kind: flight.kind, typeId: flight.typeId,
-        targetAt: flight.atMin * 60 + (flight.kind === "arr" ? 7 : 6) * 60, actualAt: null, serviced: false, transferred: false, closed: false, delays: emptyDelays() });
+        targetAt: flight.atMin * 60 + (flight.kind === "arr" ? 7 : 8) * 60, actualAt: null, serviced: false, transferred: false, closed: false, delays: emptyDelays() });
       const type = getType(flight.typeId);
       if (flight.kind === "dep" && flight.standId) {
         const stand = this.idx.stands.get(flight.standId);
@@ -181,11 +182,11 @@ export class World implements SimEnv {
   }
 
   occupyRunway(ac: Aircraft): void {
-    this.runwayOccupantId = ac.id;
+    this.runwayOccupantId ??= ac.id;
   }
 
   vacateRunway(ac: Aircraft): void {
-    if (this.runwayOccupantId === ac.id) this.runwayOccupantId = null;
+    if (this.runwayOccupantId === ac.id) this.runwayOccupantId = this.aircraftList().find((a) => a.id !== ac.id && (["lineup", "takeoff", "landing"].includes(a.phase) || runwayTraffic(this).includes(a)))?.id ?? null;
   }
 
   assignStand(ac: Aircraft): string | null {
@@ -238,8 +239,10 @@ export class World implements SimEnv {
 
     this.spawnDue();
     this.updateDelays();
-    for (const ac of this.aircraftList()) stepAircraft(ac, this);
     this.flushRadio();
+    for (const ac of this.aircraftList()) { if (this.status !== "running") break; ac.lastPos = { ...ac.pos }; completeHandoff(ac, this); stepAircraft(ac, this); completeHandoff(ac, this); }
+    this.checkCollisions();
+    if (this.status !== "running") return;
     this.updateConflicts();
     this.checkSector();
     this.checkParked();
@@ -301,7 +304,7 @@ export class World implements SimEnv {
       }
       // 目标时刻取计划请求时刻，避免机位/在管上限造成的生成延误被抹掉。
       const spawned = this.aircraft.get(id);
-      if (spawned) { spawned.scheduledMovementAt = f.atMin * 60 + (f.kind === "arr" ? 7 : 6) * 60; this.reports.get(f.callsign)!.aircraftId = id; }
+      if (spawned) { spawned.scheduledMovementAt = f.atMin * 60 + (f.kind === "arr" ? 7 : 8) * 60; this.reports.get(f.callsign)!.aircraftId = id; }
       this.spawnedFlights.add(flightIndex);
     }
   }
@@ -314,13 +317,23 @@ export class World implements SimEnv {
   }
 
   private flushRadio(): void {
-    if (this.pendingRadio.length === 0) return;
-    const due = this.pendingRadio.filter((p) => p.at <= this.time);
-    if (due.length === 0) return;
-    this.pendingRadio = this.pendingRadio.filter((p) => p.at > this.time);
-    for (const p of due) {
-      this.radio.push(p.line);
-      if (this.radio.length > 240) this.radio.splice(0, this.radio.length - 240);
+    for (const ac of this.aircraftList()) {
+      const p = ac.pendingClearance;
+      if (!p) continue;
+      if (!p.sent && this.time >= p.startsAt) {
+        this.radio.push({ id: this.nextRadioId++, t: this.time, endsAt: p.readbackAt - .4, channel: p.seat, seat: p.seat, callsign: ac.callsign, text: p.radio, tone: p.warning ? "warn" : "cmd" });
+        p.sent = true;
+      }
+      if (!p.pilotSent && this.time >= p.readbackAt) {
+        this.radio.push({ id: this.nextRadioId++, t: this.time, endsAt: p.commitAt, channel: p.seat, seat: "PILOT", callsign: ac.callsign, text: p.readback, tone: "readback" });
+        p.pilotSent = true;
+      }
+      if (this.time >= p.commitAt - 1e-6) {
+        ac.pendingClearance = null;
+        const result = executeCommand(this, ac, p.command);
+        if (!result.ok) { this.systemLine(`${ac.callsign} 指令未生效：${result.reason}`); this.notify(`${ac.callsign}：${result.reason}`, "danger"); }
+        else if (result.warning) this.notify(`${ac.callsign}：${result.warning}`, "warn");
+      }
     }
   }
 
@@ -347,6 +360,40 @@ export class World implements SimEnv {
       }
     }
     this.conflicts = found;
+  }
+
+  private checkCollisions(): void {
+    const aircraft = this.aircraftList();
+    const inspection = this.operations.snapshot().find((event) => event.kind === "inspection" && event.stage === "active");
+    if (inspection) {
+      const vehicle = inspectionVehiclePose(inspection, this.time);
+      const hit = aircraft.find((ac) => hitsGroundObstacle(ac, vehicle, this.idx.def.elevationM));
+      if (hit) { this.failShift(hit, "与跑道检查车发生碰撞"); return; }
+    }
+    for (let i = 0; i < aircraft.length; i++) for (let j = i + 1; j < aircraft.length; j++) {
+      const a = aircraft[i]!, b = aircraft[j]!;
+      if (Math.hypot(a.pos.x - b.pos.x, a.pos.y - b.pos.y) > a.lengthM + b.lengthM + (a.gs + b.gs) * TICK) continue;
+      if (!aircraftCollide(a, b)) continue;
+      this.failShift(a, `与 ${b.callsign} 发生碰撞`);
+      return;
+    }
+  }
+
+  failShift(ac: Aircraft, reason: string): void {
+    if (this.status !== "running") return;
+    this.failureReason = `${ac.callsign} ${reason}`;
+    this.status = "failed";
+    this.addViolation(ac, reason, 100);
+    this.systemLine(`本班失败：${this.failureReason}`);
+  }
+
+  setSafetyMode(mode: SafetyMode): PlanChangeResult {
+    if (mode !== "guarded" && mode !== "consequence") return { ok: false, reason: "未知安全模式" };
+    if (this.status !== "running") return { ok: false, reason: "班次已结束" };
+    if (this.safetyMode === mode) return { ok: true };
+    this.safetyMode = mode;
+    if (this.recording) this.journal.push({ tick: Math.round(this.time / TICK), aircraftId: "", callsign: "SYS", kind: "safety", mode });
+    return { ok: true };
   }
 
   private checkSector(): void {
@@ -395,16 +442,18 @@ export class World implements SimEnv {
     if (this.status !== "running") return { ok: false, reason: "班次已结束，请开始新的班次" };
     const ac = this.aircraft.get(acId);
     if (!ac) return { ok: false, reason: "找不到这架飞机" };
-    const result = executeCommand(this, ac, cmd);
+    if (ac.pendingClearance) return { ok: false, reason: "无线电通话中，等待完整复诵确认" };
+    const result = previewCommand(this, ac, cmd);
     if (result.ok) {
       if (this.recording) this.journal.push({ tick: Math.round(this.time / TICK), aircraftId: acId, callsign: ac.callsign, kind: "command", command: structuredClone(cmd) });
       const seat = result.seat ?? seatOf(cmd);
-      this.say(seat, ac.callsign, result.radio);
-      const text = readbackText(ac, cmd);
-      this.pendingRadio.push({
-        at: this.time + 2.5,
-        line: { id: this.nextRadioId++, t: this.time + 2.5, seat: "PILOT", callsign: ac.callsign, text, tone: "readback" },
-      });
+      const readback = readbackText(ac, cmd);
+      const startsAt = Math.max(this.time, this.channelAvailable.get(seat) ?? 0);
+      const readbackAt = startsAt + transmissionSeconds(result.radio) + .4;
+      const commitAt = readbackAt + transmissionSeconds(readback);
+      this.channelAvailable.set(seat, commitAt + .3);
+      ac.pendingClearance = { command: structuredClone(cmd), startsAt, readbackAt, commitAt, seat, radio: result.radio, readback, warning: result.warning, sent: false, pilotSent: false };
+      this.flushRadio();
     }
     return result;
   }
@@ -414,23 +463,26 @@ export class World implements SimEnv {
   }
 
   exportReplay(): ReplayRecord {
-    return { version: 1, level: structuredClone(this.level), mode: this.mode, endedAt: this.time, actions: structuredClone(this.journal) };
+    return { version: 2, level: structuredClone(this.level), mode: this.mode, safetyMode: this.initialSafetyMode, endedAt: this.time, actions: structuredClone(this.journal) };
   }
 
   snapshot(): SimState {
     const aircraft = this.aircraftList().map((a) => {
       const route = a.route ? makeRoute(a.route.points.map((p) => ({ ...p }))) : null;
       if (route && a.route) route.minS = a.route.minS;
-      return { ...a, pos: { ...a.pos }, lastPos: { ...a.lastPos }, scored: { ...a.scored }, approach: a.approach ? { ...a.approach } : null, route };
+      return { ...a, pendingClearance: a.pendingClearance ? structuredClone(a.pendingClearance) : null, pendingHandoff: a.pendingHandoff ? { ...a.pendingHandoff } : null, pos: { ...a.pos }, lastPos: { ...a.lastPos }, scored: { ...a.scored }, approach: a.approach ? { ...a.approach } : null, route };
     });
     return {
       time: this.time,
       status: this.status,
+      safetyMode: this.safetyMode,
+      failureReason: this.failureReason,
       aircraft,
       radio: this.radio.slice(-60).map((line) => ({ ...line })),
       selectedId: this.selectedId,
       score: { ...this.score },
       runwayOccupant: this.runwayOccupantId,
+      runwayOccupants: runwayTraffic(this).map((a) => a.id),
       conflicts: [...this.conflicts],
       alerts: this.alerts.slice(-4).map((alert) => ({ ...alert })),
       clockMin: this.level.startClockMin + Math.floor(this.time / 60),

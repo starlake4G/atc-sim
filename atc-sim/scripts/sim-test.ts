@@ -1,3 +1,4 @@
+import { confirmed } from "./test-radio";
 import { AIRPORTS } from "../src/data/airports";
 import { alongRunway, buildAirport, findTaxiPath, lateralOffset } from "../src/sim/airport";
 import { botTick } from "../src/sim/bot";
@@ -74,7 +75,7 @@ check("航路：横向偏移不会导致绕圈（弧长单调）", () => {
 
 check("关卡：全部关卡都能构建世界并跑通前 60 秒", () => {
   for (const lvl of LEVELS) {
-    const w = new World(lvl);
+    const w = new World(lvl, { safetyMode: "guarded" });
     for (let i = 0; i < 600; i++) w.step();
     for (const ac of w.aircraftList()) {
       if (!Number.isFinite(ac.pos.x) || !Number.isFinite(ac.altM)) return `${lvl.id} 出现 NaN`;
@@ -85,7 +86,7 @@ check("关卡：全部关卡都能构建世界并跑通前 60 秒", () => {
 
 check("全流程：正常关卡能在机器人管制下完成多架次落地与起飞", () => {
   const lvl = getLevel("morning-rush");
-  const w = new World(lvl);
+  const w = new World(lvl, { safetyMode: "guarded" });
   const steps = Math.ceil((lvl.durationMin * 60) / TICK);
   for (let i = 0; i < steps; i++) {
     w.step();
@@ -102,7 +103,7 @@ check("全流程：正常关卡能在机器人管制下完成多架次落地与�
 
 check("全流程：一架进场机能沿 STAR 进场、截获 ILS 并落地", () => {
   const lvl = { ...getLevel("tutorial") };
-  const w = new World(lvl);
+  const w = new World(lvl, { safetyMode: "guarded" });
   let landed = false;
   for (let i = 0; i < 20 * 60 * 10 && !landed; i++) {
     w.step();
@@ -114,7 +115,7 @@ check("全流程：一架进场机能沿 STAR 进场、截获 ILS 并落地", ()
 
 check("全流程：离场机能推出、滑行、起飞并移交", () => {
   const lvl = { ...getLevel("tutorial"), flights: [{ callsign: "TST001", airline: "测试", typeId: "A320", kind: "dep" as const, atMin: 0, standId: "S2" }] };
-  const w = new World(lvl);
+  const w = new World(lvl, { safetyMode: "guarded" });
   let took = false;
   for (let i = 0; i < 15 * 60 * 10 && !took; i++) {
     w.step();
@@ -126,7 +127,7 @@ check("全流程：离场机能推出、滑行、起飞并移交", () => {
 
 check("跑道互锁：跑道被占时落地许可被拒", () => {
   const lvl = getLevel("morning-rush");
-  const w = new World(lvl);
+  const w = new World(lvl, { safetyMode: "guarded" });
   for (let i = 0; i < 300; i++) w.step();
   const ac = w.aircraftList()[0];
   if (!ac) return "没有生成飞机";
@@ -135,13 +136,13 @@ check("跑道互锁：跑道被占时落地许可被拒", () => {
   const other = { ...ac, id: "occupant", callsign: "BUSY", phase: "lineup" as const };
   w.aircraft.set(other.id, other);
   w.occupyRunway(other);
-  const res = w.issue(ac.id, { kind: "land" });
+  const res = confirmed(w, ac.id, { kind: "land" });
   return !res.ok && res.reason.includes("BUSY") || "应因另一架飞机占用跑道被拒绝";
 });
 
 check("分离：两架飞机贴近时会被判为冲突", () => {
   const lvl = getLevel("tutorial");
-  const w = new World(lvl);
+  const w = new World(lvl, { safetyMode: "guarded" });
   for (let i = 0; i < 300; i++) w.step();
   const list = w.aircraftList();
   if (list.length < 1) return "没有飞机";
@@ -158,7 +159,7 @@ check("单位：速度换算往返一致", () => {
 
 check("地面：所有飞机位置都在物理范围内（不出现地下/天上乱飞）", () => {
   const lvl = getLevel("morning-rush");
-  const w = new World(lvl);
+  const w = new World(lvl, { safetyMode: "guarded" });
   for (let i = 0; i < 4500; i++) {
     w.step();
     if (i % 20 === 0) botTick(w);
@@ -177,7 +178,7 @@ function singleDeparture() {
 }
 
 function singleArrival() {
-  const w = new World(getLevel("tutorial"));
+  const w = new World(getLevel("tutorial"), { safetyMode: "guarded" });
   w.step();
   return { w, ac: w.aircraftList()[0]! };
 }
@@ -185,7 +186,7 @@ function singleArrival() {
 check("推出：四种机头朝向均能完成离场", () => {
   for (const hdg of [0, 90, 180, 270]) {
     const { w, ac } = singleDeparture();
-    w.issue(ac.id, { kind: "pushback", hdg });
+    confirmed(w, ac.id, { kind: "pushback", hdg });
     for (let i = 0; i < 9000; i++) { w.step(); if (i % 20 === 0) botTick(w); }
     if (w.score.takeoffs !== 1) return `机头 ${hdg}° 卡在 ${ac.phase}`;
   }
@@ -194,12 +195,13 @@ check("推出：四种机头朝向均能完成离场", () => {
 
 check("推出：原地等待确实停止，继续后恢复", () => {
   const { w, ac } = singleDeparture();
-  w.issue(ac.id, { kind: "pushback", hdg: 180 });
-  w.issue(ac.id, { kind: "hold" });
+  confirmed(w, ac.id, { kind: "pushback", hdg: 180 });
+  confirmed(w, ac.id, { kind: "hold" });
+  for (let i = 0; i < 50 && ac.gs > 0; i++) w.step();
   const pos = { ...ac.pos };
   for (let i = 0; i < 100; i++) w.step();
   if (dist(pos, ac.pos) > 0.01) return "等待后仍在移动";
-  w.issue(ac.id, { kind: "resume" });
+  confirmed(w, ac.id, { kind: "resume" });
   for (let i = 0; i < 100; i++) w.step();
   return dist(pos, ac.pos) > 10;
 });
@@ -207,8 +209,8 @@ check("推出：原地等待确实停止，继续后恢复", () => {
 check("起飞：进跑道途中追加许可，必须完成对正后才滑跑", () => {
   const { w, ac } = singleDeparture();
   ac.phase = "hold_short"; ac.pos = { ...w.idx.nodes.get(w.idx.holdingNode)!.pos };
-  w.issue(ac.id, { kind: "lineup" });
-  w.issue(ac.id, { kind: "takeoff" });
+  confirmed(w, ac.id, { kind: "lineup" });
+  confirmed(w, ac.id, { kind: "takeoff" });
   if (w.aircraft.get(ac.id)?.phase !== "lineup") return "在滑行道上提前开始起飞";
   for (let i = 0; i < 1000 && w.aircraft.get(ac.id)?.phase === "lineup"; i++) w.step();
   return w.aircraft.get(ac.id)?.phase === "takeoff" && Math.abs(lateralOffset(w.idx, ac.pos)) < 1;
@@ -217,9 +219,9 @@ check("起飞：进跑道途中追加许可，必须完成对正后才滑跑", (
 check("进近：错跑道与未建立进近的落地许可被拒绝", () => {
   const { w, ac } = singleArrival();
   ac.pos = { x: 18000, y: 0 };
-  if (w.issue(ac.id, { kind: "approach", runwayId: "09" }).ok) return "接受了错误跑道";
-  w.issue(ac.id, { kind: "approach", runwayId: "27" });
-  return !w.issue(ac.id, { kind: "land" }).ok;
+  if (confirmed(w, ac.id, { kind: "approach", runwayId: "09" }).ok) return "接受了错误跑道";
+  confirmed(w, ac.id, { kind: "approach", runwayId: "27" });
+  return !confirmed(w, ac.id, { kind: "land" }).ok;
 });
 
 check("跑道预留：落地许可阻止其他机进跑道，取消后可进入", () => {
@@ -228,17 +230,18 @@ check("跑道预留：落地许可阻止其他机进跑道，取消后可进入"
   ac.approach = { runwayId: "27", established: true };
   const dep = { ...singleDeparture().ac, id: "dep", phase: "hold_short" as const };
   w.aircraft.set(dep.id, dep);
-  if (!w.issue(ac.id, { kind: "land" }).ok) return "无法取得落地许可";
-  if (w.issue(dep.id, { kind: "lineup" }).ok || w.issue(dep.id, { kind: "takeoff" }).ok) return "落地预留未互锁";
-  w.issue(ac.id, { kind: "cancelLanding" });
-  return w.issue(dep.id, { kind: "lineup" }).ok;
+  if (!confirmed(w, ac.id, { kind: "land" }).ok) return "无法取得落地许可";
+  if (confirmed(w, dep.id, { kind: "lineup" }).ok || confirmed(w, dep.id, { kind: "takeoff" }).ok) return "落地预留未互锁";
+  confirmed(w, ac.id, { kind: "cancelLanding" });
+  confirmed(w, ac.id, { kind: "goAround" });
+  return confirmed(w, dep.id, { kind: "lineup" }).ok;
 });
 
 check("进近：改航向或直飞后恢复引导阶段", () => {
   for (const cmd of [{ kind: "heading" as const, hdg: 250 }, { kind: "direct" as const, fix: "KAVLA" }]) {
     const { w, ac } = singleArrival();
     ac.phase = "approach"; ac.approach = { runwayId: "27", established: true }; ac.landCleared = true;
-    w.issue(ac.id, cmd);
+    confirmed(w, ac.id, cmd);
     if (w.aircraft.get(ac.id)?.phase !== "arrival" || ac.approach || ac.landCleared) return "仍停留在进近阶段或保留许可";
   }
   return true;
@@ -247,8 +250,8 @@ check("进近：改航向或直飞后恢复引导阶段", () => {
 check("进近：玩家减速指令生效", () => {
   const { w, ac } = singleArrival();
   ac.pos = { x: 22000, y: 0 }; ac.hdg = 270;
-  w.issue(ac.id, { kind: "approach", runwayId: "27" });
-  w.issue(ac.id, { kind: "speed", kt: 160 });
+  confirmed(w, ac.id, { kind: "approach", runwayId: "27" });
+  confirmed(w, ac.id, { kind: "speed", kt: 160 });
   for (let i = 0; i < 500; i++) w.step();
   return toKt(ac.gs) <= 161 || `速度仍为 ${toKt(ac.gs)}`;
 });
@@ -257,8 +260,8 @@ check("复飞恢复：飞过跑道后仍能直飞 IAF，指令不被自动逻辑
   const { w, ac } = singleArrival();
   ac.phase = "approach"; ac.approach = { runwayId: "27", established: true };
   ac.pos = { x: -2000, y: 0 }; ac.hdg = 270;
-  w.issue(ac.id, { kind: "goAround" });
-  w.issue(ac.id, { kind: "direct", fix: "KAVLA" });
+  confirmed(w, ac.id, { kind: "goAround" });
+  confirmed(w, ac.id, { kind: "direct", fix: "KAVLA" });
   for (let i = 0; i < 100; i++) w.step();
   return ac.route !== null && ac.clearedHdg === null && w.score.goArounds === 1;
 });
@@ -289,7 +292,7 @@ check("滑跑：减速后仍能到达脱离口，机尾清空前持续占用跑�
 check("脱离：拒绝已经错过的出口", () => {
   const { w, ac } = singleArrival();
   ac.phase = "landing"; ac.pos = { x: 100, y: 0 }; ac.gs = ktRaw(10);
-  return !w.issue(ac.id, { kind: "exit", nodeId: "E_A1" }).ok && ac.exitNodeId === null;
+  return !confirmed(w, ac.id, { kind: "exit", nodeId: "E_A1" }).ok && ac.exitNodeId === null;
 });
 
 check("航班生成：被占用机位不能阻塞后续进场", () => {
@@ -314,10 +317,10 @@ check("状态清理：飞机移除时释放跑道和选中状态", () => {
 check("指令校验：非法数值及班次结束后不能修改世界", () => {
   const { w, ac } = singleArrival();
   for (const cmd of [{ kind: "speed" as const, kt: NaN }, { kind: "altitude" as const, altFt: -100 }, { kind: "heading" as const, hdg: Infinity }]) {
-    if (w.issue(ac.id, cmd).ok) return "接受非法指令";
+    if (confirmed(w, ac.id, cmd).ok) return "接受非法指令";
   }
   w.status = "finished";
-  return !w.issue(ac.id, { kind: "heading", hdg: 50 }).ok;
+  return !confirmed(w, ac.id, { kind: "heading", hdg: 50 }).ok;
 });
 
 check("快照：嵌套对象不能反向修改世界", () => {

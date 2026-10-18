@@ -4,6 +4,7 @@ import type { RunwayPlanEntry } from "./planning";
 export type Seat = "GND" | "TWR" | "APP" | "SYS";
 export type Wake = "L" | "M" | "H";
 export type ControlMode = "assisted" | "standard";
+export type SafetyMode = "guarded" | "consequence";
 export type Controller = "GND" | "TWR" | "APP" | "DEP";
 
 export interface AircraftTypeDef {
@@ -186,6 +187,9 @@ export interface Aircraft {
   vs: number;
   phase: Phase;
   controller: Controller;
+  pendingClearance: PendingClearance | null;
+  pendingHandoff: { controller: Controller; confirmedAt: number } | null;
+  touchdownAt: number | null;
   airHolding: boolean;
   groundNodeId: string | null;
   groundGoal: "runway" | "stand" | "clear" | null;
@@ -260,10 +264,11 @@ export interface CommandOption {
   command: Command;
   tone?: "primary" | "danger" | "muted";
   disabledReason?: string;
+  warning?: string;
 }
 
 export type CommandResult =
-  | { ok: true; radio: string; seat: Seat }
+  | { ok: true; radio: string; seat: Seat; warning?: string }
   | { ok: false; reason: string };
 
 export interface RadioLine {
@@ -273,11 +278,28 @@ export interface RadioLine {
   callsign: string;
   text: string;
   tone: "cmd" | "readback" | "event" | "warn";
+  endsAt?: number;
+  channel?: Seat;
+}
+
+export interface PendingClearance {
+  command: Command;
+  startsAt: number;
+  readbackAt: number;
+  commitAt: number;
+  seat: Seat;
+  radio: string;
+  readback: string;
+  warning?: string;
+  sent: boolean;
+  pilotSent: boolean;
 }
 
 export interface SimState {
   time: number;
-  status: "running" | "finished";
+  status: "running" | "finished" | "failed";
+  safetyMode: SafetyMode;
+  failureReason: string | null;
   aircraft: Aircraft[];
   radio: RadioLine[];
   selectedId: string | null;
@@ -292,6 +314,7 @@ export interface SimState {
     departuresTransferred: number;
   };
   runwayOccupant: string | null;
+  runwayOccupants: string[];
   conflicts: string[];
   alerts: { id: number; text: string; tone: "warn" | "danger"; t: number }[];
   clockMin: number;

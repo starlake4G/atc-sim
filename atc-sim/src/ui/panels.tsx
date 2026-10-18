@@ -16,7 +16,7 @@ export function Metric({ label, value }: { label: string; value: string }) {
   return <div className="metric"><span>{label}</span><b>{value}</b></div>;
 }
 
-export function TopBar(props: { snap: SimState; paused: boolean; speed: number; view: ViewMode; onPause: () => void; onSpeed: (speed: number) => void; onView: (view: ViewMode) => void; onBack: () => void; onHelp: () => void; editing: boolean; onLayout: () => void; onReset: () => void; onAdvance: () => void; canAdvance: boolean; sound: boolean; onSound: () => void; quality: string; onQuality: () => void; focused: boolean; onFocus: () => void }) {
+export function TopBar(props: { snap: SimState; paused: boolean; speed: number; view: ViewMode; onPause: () => void; onSpeed: (speed: number) => void; onView: (view: ViewMode) => void; onBack: () => void; onHelp: () => void; editing: boolean; onLayout: () => void; onReset: () => void; onAdvance: () => void; canAdvance: boolean; sound: boolean; onSound: () => void; quality: string; onQuality: () => void; focused: boolean; onFocus: () => void; onSafety: () => void; readOnly?: boolean }) {
   return <div className="topbar">
     <button className="ghost exit-button" onClick={props.onBack}>退出</button><span className="top-brand">KESTREL<small>APPROACH / KEKS</small></span>
     <div className="clock">{fmtClock(props.snap.clockMin)}</div>
@@ -24,10 +24,11 @@ export function TopBar(props: { snap: SimState; paused: boolean; speed: number; 
     <div className="stat"><b>{props.snap.score.points}</b><span>积分</span></div>
     <div className={`stat ${props.snap.score.violations ? "bad" : ""}`}><b>{props.snap.score.violations}</b><span>违规</span></div>
     <div className="spacer" /><div className="toolbar-group time-controls"><button className="ghost" onClick={props.onPause}>{props.paused ? "继续" : "暂停"}</button>
-    {[1, 2, 4].map((speed) => <button key={speed} className={`ghost ${props.speed === speed ? "on" : ""}`} onClick={() => props.onSpeed(speed)}>{speed}×</button>)}
+    {[1, 2, 4].map((speed) => <button key={speed} title={`${speed} 倍实时速度`} className={`ghost ${props.speed === speed ? "on" : ""}`} onClick={() => props.onSpeed(speed)}>{speed}×</button>)}
     </div><button className="advance-button ghost" disabled={!props.canAdvance} title={props.canAdvance ? "推进至下个需要你处理的请求，最多 5 游戏分钟；不会替你下达许可" : "先处理待办，或先查看即将落地的航班"} onClick={props.onAdvance}>下一请求 »</button>
     <div className="toolbar-group camera-controls">{(["tower", "follow", "top"] as ViewMode[]).map((view) => <button key={view} className={`ghost ${props.view === view ? "on" : ""}`} onClick={() => props.onView(view)}>{({ tower: "塔台", follow: "跟机", top: "俯瞰" })[view]}</button>)}</div>
     <button className={`ghost focus-button ${props.focused ? "on" : ""}`} aria-pressed={props.focused} title="扩大机场画面，保留航班与许可；V 切换" onClick={props.onFocus}>专注视图</button>
+    <button className={`ghost safety-toggle ${props.snap.safetyMode === "guarded" ? "on" : ""}`} role="switch" aria-checked={props.snap.safetyMode === "guarded"} disabled={props.readOnly || props.snap.status !== "running"} title={props.snap.safetyMode === "guarded" ? "风险保护开启：有风险时拒绝许可。点击切换为自由放行、实际碰撞失败。" : "风险保护关闭：风险只警告，实际碰撞会失败。点击启用风险拒绝。"} onClick={props.onSafety}>风险保护{props.snap.safetyMode === "guarded" ? "开" : "关"}</button>
     <button className="ghost" onClick={props.onHelp}>操作指南</button>
     <button className={`ghost ${props.editing ? "on" : ""}`} onClick={props.onLayout}>{props.editing ? "完成布局" : "布局编辑"}</button>
     {props.editing && <button className="ghost" onClick={props.onReset}>恢复布局</button>}
@@ -60,7 +61,8 @@ export function FlightList({ snap, world, onPick }: { snap: SimState; world: Wor
 export function RadioLog({ snap, baseClock }: { snap: SimState; baseClock: number }) {
   const ref = useRef<HTMLDivElement>(null); const follow = useRef(true);
   useEffect(() => { if (ref.current && follow.current) ref.current.scrollTop = ref.current.scrollHeight; }, [snap.radio.at(-1)?.id]);
-  return <div className="panel radio"><div className="panel-title"><span>无线电记录</span><span>APP · TWR · GND</span></div>
+  const live = snap.radio.filter((line) => line.endsAt !== undefined && line.t <= snap.time && line.endsAt > snap.time);
+  return <div className="panel radio"><div className="panel-title"><span>无线电记录</span><span>APP · TWR · GND</span></div>{live.map((line) => <div key={line.id} className="radio-live"><b>{line.channel} · {line.seat === "PILOT" ? "飞行员复诵" : "管制员发话"}</b><span>{line.callsign} · {Math.ceil(line.endsAt! - snap.time)}s</span><progress max={line.endsAt! - line.t} value={snap.time - line.t} /></div>)}
     <div className="radio-body" ref={ref} onScroll={() => { const el = ref.current!; follow.current = el.scrollHeight - el.scrollTop - el.clientHeight < 30; }}>
       {snap.radio.map((line) => <div key={line.id} className={`line ${line.tone}`}><span className="t">{fmtClock(baseClock + Math.floor(line.t / 60))}</span><span className="from">{line.seat}</span><span className="txt">{line.callsign !== "—" ? `${line.callsign} ` : ""}{line.text}</span></div>)}
     </div>
@@ -68,20 +70,20 @@ export function RadioLog({ snap, baseClock }: { snap: SimState; baseClock: numbe
 }
 
 export function guidanceFor(ac: Aircraft, world: World): string {
-  if (ac.blockedBy) return `${ac.blockedBy}。可等待通行，后续放行可使用旁通道 C。`;
+  if (ac.blockedBy) return `${ac.blockedBy}。间距恢复后自动继续，可下达原地等待。`;
   if (ac.airHolding) return "正在空中等待。需要恢复时，选择直飞 KAVLA，再安排 ILS 进近。";
   switch (ac.phase) {
     case "arrival": return "预排进场顺序：可减速、等待或直飞。距场 32 公里内下达 ILS 进近许可。";
-    case "approach": return ac.landCleared ? "已获准落地，保持监控；可取消许可或执行安全复飞。" : !ac.approach?.established ? "正在截获航向道。建立后联系塔台，再下达落地许可。" : ac.controller === "APP" && world.mode === "standard" ? "已建立进近：联系塔台 118.1，然后下达落地许可。" : "确认跑道空闲，再下达落地许可。";
+    case "approach": return ac.landCleared ? "已获准落地，保持监控；可取消许可或执行安全复飞。" : !ac.approach?.established ? "正在截获航向道。可先联系塔台，建立后再下达落地许可。" : ac.controller === "APP" && world.mode === "standard" ? "已建立进近：联系塔台 118.1，然后下达落地许可。" : "确认跑道空闲，再下达落地许可。";
     case "parked": return ac.kind === "dep" ? "批准推出；标准模式下，推出完成后还需批准滑行。" : "到达机位，服务完成。";
     case "pushback": return "牵引车正在推出。完成后会请求滑行许可，可先观察地面路线。";
     case "taxi_ready": return ac.kind === "arr" && ac.controller !== "GND" && world.mode === "standard" ? "已清空跑道：联系地面 121.7，再批准滑入机位。" : "选择推荐路线或打开路线工作台；确认后飞机才开始滑行。";
-    case "taxi_out": return ac.holding ? "主动等待中。选择继续滑行恢复。" : "按许可路线滑行。到达 H27 后联系塔台，等待起飞许可。";
+    case "taxi_out": return ac.holding ? "主动等待中。选择继续滑行恢复。" : "按许可路线滑行。可预联系塔台；到达 H27 后生效，等待起飞许可。";
     case "hold_short": return ac.controller !== "TWR" && world.mode === "standard" ? "到达等待点：联系塔台 118.1。" : "结合进场 ETA，确认跑道空闲，再进跑道等待或批准起飞。";
     case "lineup": return ac.takeoffPending ? "已获准起飞，完成对正后开始滑跑。" : "正在进跑道等待，可追加起飞许可。";
-    case "landing": return "选择可安全减速到达的出口；不指定时自动选择。较早脱离有助于释放跑道。";
+    case "landing": return "选择可安全减速到达的出口；不指定时自动选择。接地后即可联系地面。";
     case "taxi_in": return world.runwayOccupantId === ac.id ? "正在脱离，机尾越过道面后释放跑道。" : "按路线滑入兼容机位，停稳后完成服务。";
-    case "departure": return ac.controller === "DEP" ? "已移交离场，航班将继续沿离场程序飞行。" : "爬升至机场上方 1500 ft 后，可移交离场 124.6。";
+    case "departure": return ac.controller === "DEP" ? "已移交离场，航班将继续沿离场程序飞行。" : "可预移交离场 124.6；复诵确认且爬升至机场上方 1500 ft 后生效。";
     default: return "观察航班执行情况，优先处理右侧待办提示。";
   }
 }
@@ -93,11 +95,15 @@ export function CommandStrip({ ac, world, options, onCmd, onPlanRoute }: { ac: A
   const advanced = ["引导", "高度", "速度"];
   const groups = new Map<string, CommandOption[]>(); for (const option of options) if (option.key !== recommended?.key && (expanded || !advanced.includes(option.group) && option.command.kind !== "pushback")) groups.set(option.group, [...groups.get(option.group) ?? [], option]);
   const blocked = options.find((option) => option.disabledReason && (option.tone === "primary" || option.key === "takeoff"));
+  const warning = options.find((option) => option.warning)?.warning;
+  const pending = ac.pendingClearance;
   const delay = Math.max(0, world.time - ac.scheduledMovementAt);
   const showOpportunity = ac.kind === "dep" && (ac.phase === "hold_short" || ac.phase === "lineup");
   return <div className="strip"><div className="strip-info"><div className="strip-head"><b>{ac.callsign}</b><span>{ac.typeId} · {ac.controller}</span><span className="phase">{phaseLabel(ac)}</span></div><div className="strip-metrics"><Metric label="高度" value={fmtAlt(ac.altM)} /><Metric label="地速" value={`${fmtSpd(ac.gs)}kt`} /><Metric label="航向" value={fmtHdg(ac.hdg)} /><Metric label="距场" value={fmtDist(distanceToThreshold(world.idx, ac.pos))} /></div></div>
     <div className="command-workflow"><FlightSteps ac={ac} /><span className={`flight-delay ${delay > 60 ? "late" : ""}`}>{ac.scored.departed || ac.scored.landed ? "已完成起降" : delay > 0 ? `目标延误 +${fmtDuration(delay)}` : `目标时刻 ${fmtClock(world.level.startClockMin + ac.scheduledMovementAt / 60)}`}</span></div>
-    {showOpportunity ? <DepartureOpportunity ac={ac} world={world} /> : <div className={`guidance ${blocked ? "blocked" : ""}`}>{blocked?.disabledReason ?? guidanceFor(ac, world)}</div>}<div className="strip-cmds">{recommended && <button className="cmd primary recommended-command" onClick={() => onCmd(recommended.command)}><kbd>E</kbd>{recommended.label}</button>}{options.length === 0 && <span className="none">按许可执行中</span>}{[...groups].map(([group, list]) => <div key={group} className="cmd-group"><span className="gname">{group}</span>{list.map((option) => <button key={option.key} disabled={!!option.disabledReason} title={option.disabledReason} className={`cmd ${option.tone ?? ""}`} onClick={() => onCmd(option.command)}>{option.label}</button>)}</div>)}{ac.phase === "taxi_ready" && <button className="cmd" onClick={onPlanRoute}>规划滑行路线</button>}{options.some((option) => (advanced.includes(option.group) || option.command.kind === "pushback") && option.key !== recommended?.key) && <button className={`cmd vector-toggle ${expanded ? "on" : ""}`} aria-expanded={expanded} onClick={() => setExpanded((value) => !value)}>{ac.phase === "parked" ? expanded ? "收起方向选项" : "其他推出方向" : expanded ? "收起雷达指令" : "航向 / 高度 / 速度"}</button>}</div>
+    {pending ? <div className="clearance-progress" role="status"><b>{world.time < pending.startsAt ? "等待频道空闲" : world.time < pending.readbackAt ? "管制员发话中" : "飞行员复诵中"} · {Math.ceil(pending.commitAt - world.time)}s 后确认</b><span>{pending.radio} · 完整复诵后生效</span><progress max={pending.commitAt - pending.startsAt} value={Math.max(0, world.time - pending.startsAt)} /></div> : showOpportunity ? <DepartureOpportunity ac={ac} world={world} /> : <div className={`guidance ${blocked ? "blocked" : warning ? "warning" : ""}`}>{blocked?.disabledReason ?? (warning ? `风险提示：${warning}` : guidanceFor(ac, world))}</div>}
+    {ac.pendingHandoff && <div className="handoff-pending" role="status">已复诵确认 → {ac.pendingHandoff.controller} · {ac.pendingHandoff.controller === "DEP" ? "等待离地并爬升至 1500 ft，塔台继续管制" : "到达跑道外等待点后完成移交"}</div>}
+    <div className="strip-cmds">{recommended && <button title={recommended.warning} className={`cmd primary recommended-command ${recommended.warning ? "warning" : ""}`} onClick={() => onCmd(recommended.command)}><kbd>E</kbd>{recommended.warning ? "⚠ " : ""}{recommended.label}</button>}{options.length === 0 && <span className="none">按许可执行中</span>}{[...groups].map(([group, list]) => <div key={group} className="cmd-group"><span className="gname">{group}</span>{list.map((option) => <button key={option.key} disabled={!!option.disabledReason} title={option.disabledReason ?? option.warning} className={`cmd ${option.tone ?? ""} ${option.warning ? "warning" : ""}`} onClick={() => onCmd(option.command)}>{option.warning ? "⚠ " : ""}{option.label}</button>)}</div>)}{ac.phase === "taxi_ready" && <button disabled={!!pending} className="cmd" onClick={onPlanRoute}>规划滑行路线</button>}{options.some((option) => (advanced.includes(option.group) || option.command.kind === "pushback") && option.key !== recommended?.key) && <button className={`cmd vector-toggle ${expanded ? "on" : ""}`} aria-expanded={expanded} onClick={() => setExpanded((value) => !value)}>{ac.phase === "parked" ? expanded ? "收起方向选项" : "其他推出方向" : expanded ? "收起雷达指令" : "航向 / 高度 / 速度"}</button>}</div>
   </div>;
 }
 

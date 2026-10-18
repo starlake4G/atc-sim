@@ -88,6 +88,26 @@ export function makeRoute(points: Vec2[]): Route {
   return new PolylineRoute(points);
 }
 
+/** Retain graph waypoints for leases, while rounding the physical track inside the pavement. */
+export function makeGroundRoute(points: Vec2[]): Route {
+  const route = makeRoute(points), pointAt = route.pointAt.bind(route);
+  route.pointAt = (s: number) => {
+    let along = 0;
+    for (let i = 1; i < route.points.length - 1; i++) {
+      const a = route.points[i - 1]!, b = route.points[i]!, c = route.points[i + 1]!;
+      const before = dist(a, b), after = dist(b, c); along += before;
+      const r = Math.min(18, before * .35, after * .35);
+      if (s < along - r || s > along + r || r < 2) continue;
+      const p = { x: b.x + (a.x - b.x) * r / before, y: b.y + (a.y - b.y) * r / before };
+      const q = { x: b.x + (c.x - b.x) * r / after, y: b.y + (c.y - b.y) * r / after };
+      const t = (s - along + r) / (2 * r), u = 1 - t;
+      return { x: u * u * p.x + 2 * u * t * b.x + t * t * q.x, y: u * u * p.y + 2 * u * t * b.y + t * t * q.y };
+    }
+    return pointAt(s);
+  };
+  return route;
+}
+
 /** 沿折线取一串等距采样点（3D 画引导线用） */
 export function sampleRoute(route: Route, stepM: number): Vec2[] {
   const out: Vec2[] = [];

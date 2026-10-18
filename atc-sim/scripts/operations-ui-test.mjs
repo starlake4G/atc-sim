@@ -34,7 +34,7 @@ try {
   console.log("✓ 八关菜单与事件预览在桌面、平板和手机均可直接开始");
 
   await page.setViewport({ width: 1440, height: 900 });
-  await page.goto(`${base}/?level=operating-windows&mode=standard&fast=65&lite=1&view=top&paused=1`); await wait(".inspection-start"); await pause(); await capture();
+  await page.goto(`${base}/?level=operating-windows&mode=standard&safety=guarded&fast=65&lite=1&view=top&paused=1`); await wait(".inspection-start"); await pause(); await capture();
   assert.equal(await page.$eval(".inspection-start", (el) => el.disabled), false);
   await page.click(".inspection-start"); await wait(".runway-state.closed"); await wait(".map-closure");
   assert.match(await page.$eval(".operation-item.kind-inspection", (el) => el.textContent), /进行中.*后恢复/);
@@ -61,7 +61,7 @@ try {
   assert.equal(await page.evaluate(() => JSON.stringify(window.testWorld.score)), await page.evaluate(() => window.originalScore));
   console.log("✓ 运行复盘显示实际检查策略，回放重建提前检查与天气，返回后成绩不变");
 
-  await page.goto(`${base}/?level=operating-windows&mode=standard&fast=715&bot=1&lite=1&paused=1`); await wait(".operation-item.kind-weather.active"); await pause(); await capture();
+  await page.goto(`${base}/?level=operating-windows&mode=standard&safety=guarded&fast=715&bot=1&lite=1&paused=1`); await wait(".operation-item.kind-weather.active"); await pause(); await capture();
   await clickText(".flights .row", "OPS204"); await wait(".guidance");
   assert.match(await page.$eval(".guidance", (el) => el.textContent), /阵风侧风.*AT72.*15kt.*恢复/);
   assert.match(await page.$eval(".weather", (el) => el.textContent), /18G26kt/);
@@ -82,7 +82,7 @@ try {
   }
   console.log("✓ 受风许可与跑道计划显示相同恢复窗口，三种尺寸事件面板不遮挡许可区域");
 
-  await page.goto(`${base}/?level=operating-windows&mode=standard&fast=65&lite=1&paused=1`); await wait(".mobile-operations.has-event");
+  await page.goto(`${base}/?level=operating-windows&mode=standard&safety=guarded&fast=65&lite=1&paused=1`); await wait(".mobile-operations.has-event");
   assert.equal(await page.$eval(".flights", (el) => getComputedStyle(el).display), "flex");
   assert(await page.$eval(".mobile-operations", (el) => { const r = el.getBoundingClientRect(); return document.elementFromPoint(r.x + r.width / 2, r.y + r.height / 2)?.closest(".mobile-operations") === el; }), "航班面板展开时运行入口仍应可点击");
   await page.click(".mobile-operations"); await page.waitForFunction(() => getComputedStyle(document.querySelector(".flights")).display === "none");

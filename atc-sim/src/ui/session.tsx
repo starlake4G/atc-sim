@@ -40,9 +40,9 @@ export function Result({ world, snap, onRestart, onMenu, onNext, onReplay, onExp
   const movements = snap.score.landings + snap.score.takeoffs;
   const grade = rateShift(snap.score, world.level, world.mode);
   const averageDelay = movements ? Math.round(snap.score.totalDelaySec / movements / 60) : 0;
-  return <div className="overlay"><div className="modal result"><div className="result-heading"><div className="grade">{grade.grade}</div><div><h2>{world.level.lesson ? "训练完成" : "班次复盘"}</h2><div className="sub">{grade.note} · {world.mode === "standard" ? "标准管制" : "辅助管制"}</div></div></div>
+  return <div className="overlay"><div className="modal result"><div className="result-heading"><div className="grade">{snap.status === "failed" ? "×" : grade.grade}</div><div><h2>{snap.status === "failed" ? "本班失败" : world.level.lesson ? "训练完成" : "班次复盘"}</h2><div className="sub">{snap.failureReason ?? grade.note} · {world.mode === "standard" ? "标准管制" : "辅助管制"}</div></div></div>
     <div className="result-grid"><Metric label="架次" value={`${movements}/${snap.movementsTarget}`} /><Metric label="滑入完成" value={String(snap.score.serviced)} /><Metric label="安全事件" value={String(snap.score.violations)} /><Metric label="安全复飞" value={String(snap.score.goArounds)} /><Metric label="积分" value={String(snap.score.points)} /><Metric label="平均延误" value={`${averageDelay}′`} /></div>
-    <p className="result-note">延误以进入扇区后 7 分钟 / 推出请求后 6 分钟的目标起降时刻估计。主动安全复飞本身不扣安全分。</p>
+    <p className="result-note">延误以进入扇区后 7 分钟 / 推出请求后 8 分钟的目标起降时刻估计。主动安全复飞本身不扣安全分。</p>
     <ShiftGoals snap={snap} world={world} />
     <Debrief snap={snap} world={world} onReplay={onReplay} onExport={onExport} />
     <OperationReview world={world} snap={snap} />
@@ -54,5 +54,5 @@ export function Result({ world, snap, onRestart, onMenu, onNext, onReplay, onExp
 }
 
 export function Help({ onClose }: { onClose: () => void }) {
-  return <div className="overlay"><div className="modal help-modal"><h2>你的工作是决定顺序与许可</h2><p>右侧汇总当前待办；按 N 选择下个需要处理的航班，按 E 下达底部高亮的许可。航向、高度和速度选项可按需展开。</p><div className="help-flow"><b>离场</b><p>批准推出 → 滑行许可 / 规划路线 → 跑道外等待 → 联系塔台 → 起飞 → 移交离场</p><b>进场</b><p>减速 / 等待排序 → ILS 进近 → 联系塔台 → 落地 → 脱离 → 联系地面 → 滑入机位</p></div><p>暂无待办时可点「下一请求」，最多推进 5 游戏分钟，遇到新请求或临近落地的安全决定就停下；系统不会替你发指令。</p><p>「跑道计划」可拖动调整顺序，也可先用「试排 ↑」比较相邻交换的预计延误、末架释放时间及逐航班代价，点击采用后才改序。计划非空时按队首放行，已许可顺序锁定；仍需手动控制速度、等待和许可。</p><p>离场待命时显示进近时间余量，可展开查看进跑道、滑跑、爬升释放和缓冲的计算；正余量仍需满足跑道、尾流、风况和席位等条件。短五边时间不足时会阻止起飞，并说明原因。地图可点节点规划滑行路线；空中等待后用「直飞 KAVLA」恢复进场。</p><p>运行窗口关会预告检查和阵风。可利用空档提前检查，期间先安排滑行与空中等待；超限机型可在跑道外等风，也可把可用喷气机排到前面。已许可航班先完成，检查与阵风结束后自动恢复。</p><p>结算中的「回看调度」可拖动时间轴或逐条查看操作；回放不会改变成绩。提示音可自行开启，画质可在节能、均衡和精细之间切换。</p><p>空格暂停；F2 跟随选机，F3 俯瞰。窄屏用底部按钮切换航班、雷达、地面和无线电面板。</p><button className="primary" onClick={onClose}>返回值班</button></div></div>;
+  return <div className="overlay"><div className="modal help-modal"><h2>你的工作是决定顺序与许可</h2><p>右侧汇总当前待办；按 N 选择下个需要处理的航班，按 E 下达底部高亮的许可。航向、高度和速度选项可按需展开。</p><div className="help-flow"><b>离场</b><p>批准推出 → 滑行许可 / 规划路线 → 跑道外等待 → 联系塔台 → 起飞 → 移交离场</p><b>进场</b><p>减速 / 等待排序 → ILS 进近 → 联系塔台 → 落地 → 脱离 → 联系地面 → 滑入机位</p></div><p>暂无待办时可点「下一请求」，最多推进 5 游戏分钟，遇到新请求或临近落地的安全决定就停下；系统不会替你发指令。</p><p>「跑道计划」可拖动调整顺序，也可先用「试排 ↑」比较相邻交换的预计延误、末架释放时间及逐航班代价，点击采用后才改序。计划非空时建议按队首放行，已许可顺序锁定；仍需手动控制速度、等待和许可。</p><p>离场待命时显示进近时间余量，可展开查看进跑道、滑跑、爬升释放和缓冲的计算；正余量仍需结合跑道、尾流、风况和席位判断。风险保护开启时拒绝有风险的许可；关闭时只提示风险，允许自行决定放行，实际碰撞或冲出跑道会导致本班失败。地图可点节点规划滑行路线；空中等待后用「直飞 KAVLA」恢复进场。</p><p>运行窗口关会预告检查和阵风。可利用空档提前检查，期间先安排滑行与空中等待；超限机型可在跑道外等风，也可把可用喷气机排到前面。已许可航班先完成，检查与阵风结束后自动恢复。</p><p>结算中的「回看调度」可拖动时间轴或逐条查看操作；回放不会改变成绩。提示音可自行开启，画质可在节能、均衡和精细之间切换。</p><p>1× 是实时速度。指令发送后需等待管制员发话及飞行员完整复诵，确认后才生效；暂停时通话也暂停，可继续值班或用「下一请求」推进。起飞前可预移交离场，接地后可联系地面。同向滑行自动跟车，间距恢复后自动继续。</p><p>空格暂停；F2 跟随选机，F3 俯瞰。窄屏用底部按钮切换航班、雷达、地面和无线电面板。</p><button className="primary" onClick={onClose}>返回值班</button></div></div>;
 }

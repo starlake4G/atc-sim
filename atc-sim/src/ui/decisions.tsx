@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { departurePreparationSec, departureWindowEstimates, runwayBlockReason } from "../sim/runway";
+import { departurePreparationSec, departureWindowEstimates, permissionError, runwayWarning } from "../sim/runway";
 import { summarizePlan, type RunwayPlanEntry } from "../sim/planning";
 import type { Aircraft } from "../sim/types";
 import type { World } from "../sim/world";
@@ -13,12 +13,13 @@ export function DepartureOpportunity({ ac, world }: { ac: Aircraft; world: World
   useEffect(() => setExpanded(false), [ac.id]);
   const estimate = departureWindowEstimates(world, ac)[0];
   const permission = world.commandOptions(ac).find((option) => option.key === "takeoff");
-  const blocked = permission?.disabledReason ?? (world.mode === "standard" && ac.controller !== "TWR" ? "先联系塔台，再申请起飞许可" : runwayBlockReason(world, ac));
+  const blocked = permission?.disabledReason ?? (world.mode === "standard" && ac.controller !== "TWR" ? "先联系塔台，再申请起飞许可" : permissionError(world, ac));
+  const warning = runwayWarning(world, ac);
   const margin = estimate?.marginSec;
-  const tone = ac.takeoffPending ? "executing" : blocked || margin !== undefined && margin < 0 ? "limited" : margin !== undefined && margin < 30 ? "tight" : "open";
+  const tone = ac.takeoffPending ? "executing" : blocked ? "limited" : warning || margin !== undefined && margin < 30 ? "tight" : "open";
   return <div className={`departure-opportunity ${tone}`} data-margin={margin ?? "none"} data-blocked={!!blocked}>
     <div className="opportunity-heading"><b>{ac.takeoffPending ? "已获起飞许可 · 执行中" : estimate ? `进近时间余量 ${signedTime(estimate.marginSec)}` : "当前无进近来机"}</b><span>{estimate ? `约束来机 ${estimate.callsign}` : "仍需观察引导中的航班"}</span><button aria-expanded={expanded} onClick={() => setExpanded((value) => !value)}>{expanded ? "收起计算" : "计算详情"}</button></div>
-    <p className={`guidance ${blocked ? "blocked" : ""}`}>{ac.takeoffPending ? "完成对正后按已获许可起飞，继续监控进近交通。" : blocked ?? (estimate ? `来机约 ${fmtDuration(estimate.arrivalInSec)} 到达，完整起飞窗口需 ${fmtDuration(estimate.requiredSec)}；下达许可前余量会随时间变化。` : `进跑道与滑跑预计需 ${fmtDuration(departurePreparationSec(world, ac))}；请确认跑道、尾流与运行条件，再下达许可。`)}</p>
+    <p className={`guidance ${blocked ? "blocked" : warning ? "warning" : ""}`}>{ac.takeoffPending ? "完成对正后按已获许可起飞，继续监控进近交通。" : blocked ?? (warning ? `风险提示：${warning}。保护关闭，允许放行；实际碰撞会失败。` : estimate ? `来机约 ${fmtDuration(estimate.arrivalInSec)} 到达，完整起飞窗口需 ${fmtDuration(estimate.requiredSec)}；下达许可前余量会随时间变化。` : `进跑道与滑跑预计需 ${fmtDuration(departurePreparationSec(world, ac))}；请确认跑道、尾流与运行条件，再下达许可。`)}</p>
     {expanded && <div className="opportunity-calculation">{estimate ? <><span>来机到达 <b>{fmtDuration(estimate.arrivalInSec)}</b></span><span>进跑道 + 滑跑 <b>−{fmtDuration(estimate.preparationSec)}</b></span><span>爬升释放 <b>−{fmtDuration(estimate.releaseSec)}</b></span><span>2 NM + 5s 缓冲 <b>−{fmtDuration(estimate.bufferSec)}</b></span><p>按当前进近速度和保守风分量估计，取所有进近来机中最小的余量。余量表示时间关系；许可仍需满足跑道占用、尾流、风况、检查、计划顺序与席位要求。</p></> : <p>没有进入进近阶段的来机，无法给出进近时间余量。引导阶段的航班、后续风况与管制操作仍会改变可用窗口。</p>}</div>}
   </div>;
 }

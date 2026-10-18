@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import { fmtAlt, fmtSpd } from "../format";
 import { isAirborne } from "../sim/aircraft";
 import { predictConflicts } from "../sim/awareness";
-import { taxiRoute } from "../sim/ground";
+import { taxiRoute, groundEdgePoints } from "../sim/ground";
 import type { Aircraft, Command, SimState } from "../sim/types";
 import type { World } from "../sim/world";
 
@@ -20,10 +20,9 @@ function GroundDrawing({ world, snap, onPick, draft, onNode }: MapProps & { draf
     {closed && <g className="map-closure"><path d="M23 117l10 10m0-10l-10 10M287 117l10 10m0-10l-10 10" /><text x="160" y="140" textAnchor="middle">检查中 · 暂停新起降</text></g>}
     <text x="300" y="137" textAnchor="end" className="map-caption">RWY 27</text>
     {world.idx.def.edges.map((edge, i) => {
-      const a = world.idx.nodes.get(edge.a)!.pos, b = world.idx.nodes.get(edge.b)!.pos;
-      return <path key={i} d={`M${px(a.x)} ${py(a.y)}L${px(b.x)} ${py(b.y)}`} className={`map-taxi ${edge.a.startsWith("C") && edge.b.startsWith("C") ? "bypass" : ""}`} />;
+      return <path key={i} d={groundEdgePoints(world, edge.a, edge.b).map((point, n) => `${n ? "L" : "M"}${px(point.x)} ${py(point.y)}`).join(" ")} className="map-taxi" />;
     })}
-    <text x="20" y="93" className="map-caption">A ← 进场</text><text x="20" y="64" className="map-caption">B → 离场</text><text x="255" y="80" className="map-caption">C →</text>
+    <text x="20" y="93" className="map-caption">A ← 进场</text><text x="20" y="64" className="map-caption">B → 离场</text>
     {world.idx.def.stands.map((stand) => <g key={stand.id}><rect x={px(stand.pos.x)-5} y={py(stand.pos.y)-6} width="10" height="12" rx="2" className="map-stand" /><text x={px(stand.pos.x)} y={py(stand.pos.y)-10} textAnchor="middle" className="map-caption">{stand.id}</text></g>)}
     {route && !isAirborne(selected!) && <polyline points={route.points.map((p) => `${px(p.x)},${py(p.y)}`).join(" ")} className="map-route" />}
     {world.idx.exitsByDistance.map((exit) => { const p = world.idx.nodes.get(exit.node)!.pos; return <text key={exit.node} x={px(p.x)+4} y={py(p.y)-8} className="map-caption">{exit.name}</text>; })}
@@ -39,17 +38,16 @@ export function GroundMap(props: MapProps & { onOpenRoute: () => void }) {
 export function RouteEditor(props: MapProps & { onClose: () => void; onCmd: (cmd: Command) => void }) {
   const selected = props.snap.aircraft.find((a) => a.id === props.snap.selectedId);
   const [draft, setDraft] = useState<string[]>([]);
-  const [choice, setChoice] = useState<"main" | "bypass">("main");
-  useEffect(() => { setDraft([]); setChoice("main"); }, [selected?.id]);
-  const route = selected ? taxiRoute(props.world, selected, { kind: "taxi", route: choice, via: draft }) : null;
-  const canIssue = selected?.phase === "taxi_ready" && (selected.controller === "GND" || props.world.mode === "assisted");
+  useEffect(() => { setDraft([]); }, [selected?.id]);
+  const route = selected ? taxiRoute(props.world, selected, { kind: "taxi", route: "main", via: draft }) : null;
+  const canIssue = selected?.phase === "taxi_ready" && !selected.pendingClearance && (selected.controller === "GND" || props.world.mode === "assisted");
   return <div className="overlay route-overlay"><div className="modal route-modal">
     <div className="editor-head"><div><b>滑行路线工作台</b><p>{selected ? `${selected.callsign} · ${selected.kind === "dep" ? "至跑道外等待点 H27" : `至机位 ${selected.standId ?? "待分配"}`}` : "选择一架地面飞机查看路线"}</p></div><button onClick={props.onClose}>关闭 Esc</button></div>
-    <GroundDrawing {...props} draft={draft.length ? draft : choice === "bypass" ? ["C700"] : []} onNode={canIssue ? (id) => setDraft((items) => [...items, id]) : undefined} />
-    <div className="route-tools"><button onClick={() => { setDraft([]); setChoice("main"); }}>推荐路线 B / A</button>{selected?.kind === "dep" && <button onClick={() => { setDraft([]); setChoice("bypass"); }}>旁通道 C</button>}<button onClick={() => setDraft((items) => items.slice(0, -1))}>撤销路点</button></div>
+    <GroundDrawing {...props} draft={draft} onNode={canIssue ? (id) => setDraft((items) => [...items, id]) : undefined} />
+    <div className="route-tools"><button onClick={() => setDraft([])}>推荐路线 B / A</button><button onClick={() => setDraft((items) => items.slice(0, -1))}>撤销路点</button></div>
     <p className="route-description">{canIssue ? "点击圆点指定经过节点，系统补全合法连接。青色线为确认后将执行的路线。" : "推出或脱离完成，并联系地面后，可以在这里下达滑行许可。"}</p>
     {draft.length > 0 && <div className="route-string">经 {draft.map((id) => props.world.idx.nodes.get(id)?.label ?? id).join(" → ")}</div>}
-    <div className="editor-foot"><span>{route ? `路线 ${Math.round(route.total)} 米 · 预计 ${Math.ceil(route.total / 5 / 60)} 游戏分钟` : "路线不可通行或没有兼容机位"}</span><button className="primary" disabled={!canIssue || !route} onClick={() => { props.onCmd({ kind: "taxi", route: choice, via: draft }); props.onClose(); }}>确认滑行许可</button></div>
+    <div className="editor-foot"><span>{route ? `路线 ${Math.round(route.total)} 米 · 预计 ${Math.ceil(route.total / 5 / 60)} 游戏分钟` : "路线不可通行或没有兼容机位"}</span><button className="primary" disabled={!canIssue || !route} onClick={() => { props.onCmd({ kind: "taxi", route: "main", via: draft }); props.onClose(); }}>确认滑行许可</button></div>
   </div></div>;
 }
 

@@ -4,7 +4,7 @@ import { Rng } from "./rng";
 export const CHALLENGE_ID = "seed-challenge";
 export const DEFAULT_CHALLENGE_SEED = "KESTREL-2026";
 /** Change this when the generator changes, so a shared challenge identifies its rules too. */
-export const CHALLENGE_VERSION = 1;
+export const CHALLENGE_VERSION = 2;
 
 export interface ChallengeFlightPlan extends FlightPlanDef {
   entryFix?: string;
@@ -46,7 +46,8 @@ export function normalizeChallengeSeed(value: string | number | null | undefined
 }
 
 export function challengeSeedHash(value: string | number | null | undefined): number {
-  const seed = `kestrel-challenge-v${CHALLENGE_VERSION}:${normalizeChallengeSeed(value)}`;
+  // Keep shared seeds' flight plans stable when physics / shift budgets are retuned.
+  const seed = `kestrel-challenge-v1:${normalizeChallengeSeed(value)}`;
   let hash = 0x811c9dc5;
   for (let i = 0; i < seed.length; i++) {
     hash = Math.imul(hash ^ seed.charCodeAt(i), 0x01000193);
@@ -121,7 +122,7 @@ export function createChallenge(value: string | number | null | undefined = DEFA
   return {
     id: CHALLENGE_ID, name: "挑战 · 三向合流", airportId: "kestrel", seed,
     startClockMin: rng.pick([8 * 60, 15 * 60 + 10, 18 * 60 + 25]),
-    durationMin: 35, runwayId: "27", wind: { dirDeg: 260, speedKt: rng.int(6, 10) },
+    durationMin: 45, runwayId: "27", wind: { dirDeg: 260, speedKt: rng.int(6, 10) },
     maxAircraft: 12, targetMovements: 12,
     description: "三处入口、混合机型与交错离场。安排合流次序，在落地波次之间放行；相同种子可重复挑战。",
     flights,

@@ -8,6 +8,7 @@ import { useEffect, useRef, useState } from "react";
 
 export const fmtDuration = (seconds: number) => { const s = Math.max(0, Math.round(seconds)); return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`; };
 function describeAction(action: JournalAction): string {
+  if (action.kind === "safety") return action.mode === "guarded" ? "开启风险保护" : "关闭风险保护";
   if (action.kind === "operation") return "提前开始跑道检查";
   if (action.kind === "plan") return "调整跑道计划顺序";
   const cmd = action.command;
@@ -50,7 +51,7 @@ export function AirportPreview({ evening = false }: { evening?: boolean }) {
 export function Debrief({ snap, world, onReplay, onExport }: { snap: SimState; world: World; onReplay: () => void; onExport: () => void }) {
   const totals = aggregateDelays(snap.movementReports.filter((report) => report.actualAt !== null)), total = Object.values(totals).reduce((a, b) => a + b, 0);
   const mainCause = (Object.keys(totals) as DelayReason[]).sort((a, b) => totals[b] - totals[a])[0]!;
-  const advice = { traffic: "试试分批推出，保持进出机位的共用走廊畅通；末段可考虑 C 旁通道。", permission: "优先处理待办和席位移交，再推进至下个请求。", runway: "提前比较进场 ETA，为起飞留出完整时窗，并考虑重型机的尾流间隔。", flight: "提前减速和分层，合流拥挤时先等待，再恢复进近。", taxi: "比较路线与出口位置，减少长距离滑行，同时保留前机的通行空间。" }[mainCause];
+  const advice = { traffic: "试试分批推出，保持进出机位的共用走廊畅通，让同向航班自动跟车。", permission: "优先处理待办和席位移交，再推进至下个请求。", runway: "提前比较进场 ETA，为起飞留出完整时窗，并考虑重型机的尾流间隔。", flight: "提前减速和分层，合流拥挤时先等待，再恢复进近。", taxi: "比较路线与出口位置，减少长距离滑行，同时保留前机的通行空间。" }[mainCause];
   const delayed = [...snap.movementReports].filter((r) => r.actualAt !== null).sort((a, b) => (b.actualAt! - b.targetAt) - (a.actualAt! - a.targetAt));
   return <div className="debrief"><div className="debrief-heading"><div><b>下一班可以怎样更快</b><p>已完成航班的超目标时间，按当时状态估计。</p></div><button onClick={onReplay}>回看调度 ↗</button><button className="ghost export-replay" onClick={onExport}>保存记录</button></div>
     <div className="delay-stack">{(Object.keys(totals) as DelayReason[]).map((key) => totals[key] > .1 && <span key={key} className={`delay-${key}`} style={{ width: `${totals[key] / Math.max(1, total) * 100}%` }} title={`${DELAY_LABELS[key]} ${fmtDuration(totals[key])}`} />)}</div>

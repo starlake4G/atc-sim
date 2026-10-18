@@ -1,3 +1,4 @@
+import { confirmed } from "./test-radio";
 import assert from "node:assert/strict";
 import { getLevel } from "../src/data/levels";
 import { goAround, spawnArrival, spawnDeparture } from "../src/sim/aircraft";
@@ -12,7 +13,7 @@ import { World } from "../src/sim/world";
 let passed = 0;
 function test(name: string, run: () => void) { run(); passed++; console.log(`✓ ${name}`); }
 function fixture() {
-  const world = new World({ ...getLevel("intersection"), flights: [] }, { mode: "standard" });
+  const world = new World({ ...getLevel("intersection"), flights: [] }, { mode: "standard", safetyMode: "guarded" });
   const planner = new RunwayPlanner();
   const arrival = spawnArrival(world, { id: "arr", callsign: "ARR101", airline: "极光航空", typeId: "A320", kind: "arr", standId: null });
   const departure = spawnDeparture(world, { id: "dep", callsign: "DEP202", airline: "极光航空", typeId: "E190", kind: "dep", standId: "S4" })!;
@@ -130,7 +131,7 @@ test("进跑道和起飞许可都会拒绝尚未许可落地的短五边窗口",
   arrival.phase = "approach"; arrival.approach = { runwayId: "27", established: true }; arrival.landCleared = false;
   arrival.pos = { x: world.idx.runway.threshold.x + 9500, y: 0 }; arrival.gs = kt(180);
   for (const kind of ["lineup", "takeoff"] as const) {
-    const result = world.issue(departure.id, { kind });
+    const result = confirmed(world, departure.id, { kind });
     assert(!result.ok); if (!result.ok) assert.match(result.reason, /ARR101.*起飞窗口/);
     assert.match(world.commandOptions(departure).find((option) => option.command.kind === kind)!.disabledReason!, /ARR101.*起飞窗口/);
   }
@@ -143,7 +144,7 @@ test("足够远的进近留有完整窗口，可真实放行并占用跑道", ()
   arrival.phase = "approach"; arrival.approach = { runwayId: "27", established: true };
   arrival.pos = { x: world.idx.runway.threshold.x + 25000, y: 0 }; arrival.gs = kt(180);
   assert.equal(departureWindow(world, departure), null);
-  assert(world.issue(departure.id, { kind: "takeoff" }).ok);
+  assert(confirmed(world, departure.id, { kind: "takeoff" }).ok);
   assert.equal(departure.phase, "lineup"); assert.equal(world.runwayOccupantId, departure.id);
 });
 
@@ -165,10 +166,10 @@ test("真实World计划改序改变起飞许可，已承诺顺序不可撤销", 
   const { world, arrival, departure } = fixture();
   departure.phase = "hold_short"; departure.controller = "TWR";
   assert(world.changeRunwayPlan(arrival.id, "add").ok); assert(world.changeRunwayPlan(departure.id, "add").ok);
-  const blocked = world.issue(departure.id, { kind: "takeoff" });
+  const blocked = confirmed(world, departure.id, { kind: "takeoff" });
   assert(!blocked.ok); if (!blocked.ok) assert.match(blocked.reason, /跑道计划先安排 ARR101/);
   assert(world.changeRunwayPlan(departure.id, "up").ok);
-  assert(world.issue(departure.id, { kind: "takeoff" }).ok);
+  assert(confirmed(world, departure.id, { kind: "takeoff" }).ok);
   assert(!world.changeRunwayPlan(departure.id, "remove").ok);
   assert.equal(world.snapshot().runwayPlan[0]!.committed, true);
 });
@@ -180,9 +181,9 @@ test("窗口关闭时计划预测明确需要调整，安全复飞仍可执行",
   world.changeRunwayPlan(departure.id, "add"); world.changeRunwayPlan(arrival.id, "add");
   const entry = world.snapshot().runwayPlan[0]!;
   assert.equal(entry.useAt, null); assert.equal(entry.occupyAt, null); assert.match(entry.waitReason, /ARR101.*起飞窗口不足/);
-  assert(world.issue(arrival.id, { kind: "goAround" }).ok);
+  assert(confirmed(world, arrival.id, { kind: "goAround" }).ok);
   assert.deepEqual(world.snapshot().runwayPlan.map((item) => item.aircraftId), [departure.id]);
-  assert(world.issue(departure.id, { kind: "takeoff" }).ok);
+  assert(confirmed(world, departure.id, { kind: "takeoff" }).ok);
 });
 
 test("物理跑道占用与尾流原因优先于窗口与计划原因", () => {
@@ -190,11 +191,11 @@ test("物理跑道占用与尾流原因优先于窗口与计划原因", () => {
   departure.phase = "hold_short"; departure.controller = "TWR";
   arrival.phase = "approach"; arrival.pos = { x: 8000, y: 0 }; arrival.gs = kt(180); arrival.landCleared = true;
   world.changeRunwayPlan(arrival.id, "add"); world.changeRunwayPlan(departure.id, "add");
-  const reserved = world.issue(departure.id, { kind: "takeoff" });
+  const reserved = confirmed(world, departure.id, { kind: "takeoff" });
   assert(!reserved.ok); if (!reserved.ok) assert.match(reserved.reason, /占用或获准落地/);
   arrival.landCleared = false; departure.typeId = "AT72";
   world.lastRunwayUse = { callsign: "HEAVY1", typeId: "B77W", at: world.time };
-  const wake = world.issue(departure.id, { kind: "takeoff" });
+  const wake = confirmed(world, departure.id, { kind: "takeoff" });
   assert(!wake.ok); if (!wake.ok) assert.match(wake.reason, /HEAVY1.*尾流/);
 });
 
@@ -204,7 +205,7 @@ test("短五边被守卫保护后真实推进，先落后起且没有间隔违�
   departure.phase = "hold_short"; departure.controller = "TWR"; departure.pos = { ...world.idx.nodes.get(world.idx.holdingNode)!.pos };
   arrival.phase = "approach"; arrival.approach = { runwayId: "27", established: true }; arrival.controller = "TWR";
   arrival.pos = { x: 10700, y: 0 }; arrival.hdg = 270; arrival.gs = kt(180); arrival.targetGs = kt(180); arrival.altM = glideAltM(world.idx, arrival.pos); arrival.route = null;
-  assert(!world.issue(departure.id, { kind: "takeoff" }).ok);
+  assert(!confirmed(world, departure.id, { kind: "takeoff" }).ok);
   for (let tick = 0; tick < 6000 && world.score.serviced + world.score.takeoffs < 2; tick++) {
     world.step(); if (tick % 20 === 0) botTick(world);
   }

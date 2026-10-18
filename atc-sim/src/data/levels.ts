@@ -74,7 +74,7 @@ const MERGE: LevelDef = {
 };
 const PEAK: LevelDef = {
   ...MORNING_RUSH, id: "peak-flow", name: "挑战 · 流量波次", durationMin: 38, maxAircraft: 12, targetMovements: 11,
-  description: "同一座机场，更密集的波次。用等待、机型速度差与旁通道保持流量。",
+  description: "同一座机场，更密集的波次。用等待、机型速度差与地面跟车保持流量。",
   flights: MORNING_RUSH.flights.map((flight) => ({ ...flight, atMin: flight.atMin * .55 })),
 };
 const HEAVY: LevelDef = {
@@ -94,7 +94,7 @@ const OPERATIONS: LevelDef = {
     f({ callsign: "OPS201", airline: "极光航空", typeId: "A320", kind: "dep", atMin: 0, standId: "S4" }),
     f({ callsign: "OPS302", airline: "天穹航空", typeId: "E190", kind: "arr", atMin: 1 }),
     f({ callsign: "OPS203", airline: "北欧航空", typeId: "B738", kind: "dep", atMin: 4, standId: "S2" }),
-    f({ callsign: "OPS204", airline: "清风航空", typeId: "AT72", kind: "dep", atMin: 8, standId: "S5" }),
+    f({ callsign: "OPS204", airline: "清风航空", typeId: "AT72", kind: "dep", atMin: 6.5, standId: "S5" }),
     f({ callsign: "OPS305", airline: "北风航空", typeId: "A320", kind: "arr", atMin: 9 }),
     f({ callsign: "OPS206", airline: "极光航空", typeId: "B77W", kind: "dep", atMin: 12, standId: "S1" }),
     f({ callsign: "OPS307", airline: "清风航空", typeId: "AT72", kind: "arr", atMin: 16 }),

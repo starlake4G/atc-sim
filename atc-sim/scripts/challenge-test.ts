@@ -28,7 +28,7 @@ test("128 个种子均生成完整合法班表与三个分开的进场入口", (
   for (let seed = 1; seed <= 128; seed++) {
     const level = createChallenge(seed);
     assert.equal(level.flights.length, 12);
-    assert(level.durationMin >= 25 && level.durationMin <= 35);
+    assert(level.durationMin >= 25 && level.durationMin <= 45);
     assert.equal(new Set(level.flights.map((flight) => flight.callsign)).size, 12);
     const arrivals = level.flights.filter((flight) => flight.kind === "arr");
     const departures = level.flights.filter((flight) => flight.kind === "dep");

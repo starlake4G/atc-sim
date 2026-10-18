@@ -1,3 +1,4 @@
+import { confirmed } from "./test-radio";
 import assert from "node:assert/strict";
 import { getLevel } from "../src/data/levels";
 import { getType } from "../src/data/aircraft-types";
@@ -14,7 +15,7 @@ let passed = 0;
 function test(name: string, run: () => void) { run(); passed++; console.log(`✓ ${name}`); }
 function fixture(operations: OperationDef[] = []) {
   return new World({ ...getLevel("operating-windows"), wind: { dirDeg: 270, speedKt: 0 }, operations,
-    flights: [{ ...getLevel("ground-school").flights[0]!, atMin: 30 }] }, { mode: "standard" });
+    flights: [{ ...getLevel("ground-school").flights[0]!, atMin: 30 }] }, { mode: "standard", safetyMode: "guarded" });
 }
 function dep(world: World, id = "dep", typeId = "AT72"): Aircraft {
   const ac = spawnDeparture(world, { id, callsign: id.toUpperCase(), airline: "清风航空", typeId, kind: "dep", standId: typeId === "B77W" ? "S1" : "S5" })!;
@@ -46,7 +47,7 @@ test("约束取所有来机的最小余量，慢机可比更近的快机留下�
 test("来机足够完成滑跑却不够爬升和2NM缓冲时，余量与真实守卫均不足", () => {
   const world = fixture(), ac = dep(world), preparation = departurePreparationSec(world, ac); arr(world, "arr", preparation + 5);
   const estimate = departureWindowEstimates(world, ac)[0]!; assert(estimate.arrivalInSec > preparation); assert(estimate.marginSec < 0);
-  assert(estimate.releaseSec > 0 && estimate.bufferSec > 5); assert(departureWindow(world, ac)); assert(!world.issue(ac.id, { kind: "takeoff" }).ok);
+  assert(estimate.releaseSec > 0 && estimate.bufferSec > 5); assert(departureWindow(world, ac)); assert(!confirmed(world, ac.id, { kind: "takeoff" }).ok);
 });
 
 test("正余量不绕过占用、尾流、检查、侧风、计划或塔台移交", () => {
@@ -55,7 +56,7 @@ test("正余量不绕过占用、尾流、检查、侧风、计划或塔台移�
   world.runwayOccupantId = other.id; positive(); assert.match(runwayBlockReason(world, ac)!, /占用/);
   world.runwayOccupantId = null; world.lastRunwayUse = { callsign: "HEAVY", typeId: "B77W", at: world.time }; positive(); assert.match(runwayBlockReason(world, ac)!, /尾流/);
   world.lastRunwayUse = null; world.changeRunwayPlan(other.id, "add"); positive(); assert.match(runwayBlockReason(world, ac)!, /计划/);
-  world.changeRunwayPlan(other.id, "remove"); ac.controller = "GND"; positive(); assert(!world.issue(ac.id, { kind: "takeoff" }).ok);
+  world.changeRunwayPlan(other.id, "remove"); ac.controller = "GND"; positive(); assert(!confirmed(world, ac.id, { kind: "takeoff" }).ok);
   const check = fixture([{ id: "check", name: "检查", kind: "inspection", announceMin: 0, atMin: 5, durationSec: 60 }]); check.step();
   const checked = dep(check); arr(check, "arr", 300); assert(check.startInspection("check").ok); assert(departureWindowEstimates(check, checked)[0]!.marginSec > 0); assert.match(runwayBlockReason(check, checked)!, /检查/);
   const gust = fixture([{ id: "gust", name: "阵风", kind: "weather", announceMin: 0, atMin: 0, durationSec: 60, wind: { dirDeg: 210, speedKt: 18, gustKt: 26 } }]); gust.step();
@@ -111,7 +112,7 @@ test("试排沿用检查和风况窗口，预测上下文不会污染实际事�
 });
 
 test("采用预览才生成一次真实改序，回放可精确重建被采用的计划", () => {
-  const world = new World(getLevel("intersection"), { mode: "standard" }); world.step(); const [first, second] = world.aircraftList();
+  const world = new World(getLevel("intersection"), { mode: "standard", safetyMode: "guarded" }); world.step(); const [first, second] = world.aircraftList();
   world.changeRunwayPlan(first!.id, "add"); world.changeRunwayPlan(second!.id, "add"); const count = world.exportReplay().actions.length;
   const preview = world.runwayPlan.previewMove(world, second!.id, -1); assert(preview.ok); assert.equal(world.exportReplay().actions.length, count);
   assert(world.changeRunwayPlan(second!.id, "up").ok); assert.equal(world.exportReplay().actions.length, count + 1); assert.deepEqual(world.snapshot().runwayPlan, (preview as { ok: true; entries: RunwayPlanEntry[] }).entries);

@@ -158,17 +158,19 @@ export function makeAircraftMesh(typeId: string, airline: string): THREE.Group {
 
 export function updateAircraftModel(mesh: THREE.Group, ac: Aircraft, dt: number, elevation: number, time = 0) {
   (mesh.userData.gear as THREE.Group).visible = ac.altM - elevation < 80 || ac.phase === "approach" && ac.altM - elevation < 500;
-  for (const rotor of mesh.userData.rotors ?? []) rotor.rotation.x += dt * (ac.gs > .5 ? 38 : 3);
   mesh.rotation.order = "YZX";
   const airborne = ["arrival", "approach", "departure"].includes(ac.phase);
   const previous = mesh.userData.pose as { time: number; hdg: number } | undefined;
   const elapsed = previous ? time - previous.time : 0;
+  for (const rotor of mesh.userData.rotors ?? []) rotor.rotation.x = (rotor.rotation.x + Math.max(0, elapsed) * (ac.gs > .5 ? 38 : 3)) % (Math.PI * 2);
   const turnRate = previous && elapsed > .001 && elapsed < 2 ? angleDiff(ac.hdg, previous.hdg) / elapsed * Math.PI / 180 : 0;
   if (!previous || elapsed < 0) mesh.userData.bankTarget = 0;
   if (elapsed > .001 && elapsed < 2) mesh.userData.bankTarget = clamp(Math.atan(turnRate * ac.gs / 9.81), -.44, .44);
   const bank = airborne ? (mesh.userData.bankTarget ?? 0) : 0;
-  const pitch = airborne ? clamp(Math.atan2(ac.vs, Math.max(1, ac.gs)), -.09, .16) : 0;
-  if (airborne) {
+  const flare = ac.phase === "approach" && ac.altM - elevation < 20;
+  const landingPitch = ac.phase === "landing" && ac.touchdownAt !== null ? .07 * Math.max(0, 1 - (time - ac.touchdownAt) / 4) : 0;
+  const pitch = flare ? .07 : airborne ? clamp(Math.atan2(ac.vs, Math.max(1, ac.gs)) + (ac.phase === "approach" ? .045 : 0), -.09, .16) : landingPitch;
+  if (airborne || ac.phase === "landing" && landingPitch > 0) {
     const blend = 1 - Math.exp(-dt * 5);
     mesh.rotation.x += (bank - mesh.rotation.x) * blend; mesh.rotation.z += (pitch - mesh.rotation.z) * blend;
   } else { mesh.rotation.x = mesh.rotation.z = 0; }

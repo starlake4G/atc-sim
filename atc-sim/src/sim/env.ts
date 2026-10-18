@@ -1,5 +1,5 @@
 import type { AirportIndex } from "./airport";
-import type { Aircraft, ControlMode, Seat } from "./types";
+import type { Aircraft, ControlMode, SafetyMode, Seat } from "./types";
 import type { RunwayUse } from "./runway";
 import type { RunwayPlanner } from "./planning";
 import type { OperationsManager } from "./operations";
@@ -14,6 +14,7 @@ export interface SimEnv {
   windGustKt?: number;
   runwayOccupantId: string | null;
   mode: ControlMode;
+  safetyMode?: SafetyMode;
   groundLocks: Map<string, string>;
   lastRunwayUse: RunwayUse | null;
   runwayPlan?: RunwayPlanner;
@@ -34,4 +35,5 @@ export interface SimEnv {
   /** 找一张空闲机位给进场飞机 */
   assignStand(ac: Aircraft): string | null;
   finish(ac: Aircraft): void;
+  failShift?(ac: Aircraft, reason: string): void;
 }
