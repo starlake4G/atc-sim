@@ -27,7 +27,7 @@
 
   runways: [{ id, hdg, lengthM, widthM, threshold, end, exits }],
   nodes:   [{ id, pos, kind, label }],   // kind: taxi | stand | apron | exit | holding | lineup
-  edges:   [{ a, b, maxKt }],            // 无向边，滑行图
+  edges:   [{ a, b, maxKt, oneWay, traffic }], // 可设有向边；traffic 可限制 arr / dep
   stands:  [{ id, node, pos, hdg, size }],
   fixes:   [{ name, pos }],
   arrival: { entryFix, iafFix },
@@ -50,19 +50,23 @@
 ### 1.4 滑行图怎么摆（Kestrel 的摆法可以直接抄）
 
 ```
-滑行道（y=190）   P-1150 ── P-700 ── ... ── P1090(H) ── LINEUP
-                     │         │              (跑道外等待点)
-机位（y=420）      ST1 ═ AP1 ═ P-700   ← 每个机位三段：机位 → 机坪口 → 滑行道
-跑道（y=0）        E_A1 / E_A2 / E_A3   ← 脱离口落在这条线上，再向北接滑行道
+机位（y=500）       ST1 / ST2 / ... / ST6
+机坪（y=420）       AP1 / AP2 / ... / AP6
+离场 B（y=330）     B-1150 → ... → B1090 ↓
+旁通 C（y=250）                       C700 → C1090 ↓
+进场 A（y=150）     P-1150 ← ... ← P1090(H) → LINEUP
+跑道（y=0）         E_A1 / E_A2 / E_A3
 ```
 
-- 机位用三段链（`stand → apron → taxi`），推出时走前两段
+- 机位到机坪为推出路径；标准模式停在机坪申请滑行，辅助模式继续推荐路线
+- 路段可用 `oneWay` 和 `traffic` 指定方向与机型流向。A 道进场西向，B 道离场东向；进场机经联络道到机位，必要时经西侧环路回到 B 道
+- C 旁通道从 B700 分流至 C700，在 C1090 与 B1090 南行主路同向汇合，再至 P1090。不要把 C1090 接回 B1090，否则末段会形成相向折返
 - 脱离口 `atM` 是**距跑道入口**的距离（不是距跑道端），三个口建议 800 / 1200 / 1600 米，第一个标 `highSpeed`
 - `LINEUP` 放在入口内侧 80 米处（`threshold + dir * 80`），起飞滑跑从这里开始
 
 ### 1.5 多跑道
 
-`AirportDef.runways` 可以有多个方向（Kestrel 有 09/27），但 **一个关卡只用一条**：`LevelDef.runwayId`。
+`AirportDef.runways` 可以记录多个方向，但 **一个关卡只用一条**：`LevelDef.runwayId`。Kestrel 当前仅 27 方向有完整程序；09 保留几何记录，缺少反向进跑道点，启动校验会明确拒绝。新增方向需同时配置等待点、进跑道点、进离场程序。
 跑道是单一互斥资源，同时开两条跑道要改 `World` 的跑道占用模型（目前是 `runwayOccupantId: string | null`），不是加数据能解决的。
 
 ### 1.6 注册
@@ -100,8 +104,13 @@ const MY_LEVEL: LevelDef = {
 - `atMin` 是相对班次开始的分钟数，进场机会在该时刻出现在入口点（约 31 公里外）
 - 离场机必须给 `standId`，且同一时刻不能有两架离场机共用一个机位
 - 进场机不用给机位：落地脱离时自动分配空机位
-- 航班表按 `atMin` 升序写，生成器按顺序投放
+- 重型离场只能使用 `size: "L"` 机位；指定不兼容机位、重复呼号或不存在的进场航路点会在 World 初始化时明确报错
+- `entryFix` / `arrivalRoute` / `initialAltFt` / `initialSpeedKt` 可覆盖默认进场；航路列表应从入口后的定位点开始，省略时完全沿用机场默认入口与程序
+- `seed?: string` 标识可重复班表；Kestrel 挑战生成器在 `sim/challenge.ts`，按版本和规范化种子生成 12 架航班。修改生成规则时须递增 `CHALLENGE_VERSION`
+- 建议航班表按 `atMin` 升序写；生成器独立检查到期航班，等待机位的离场机不会阻塞后续进场
 - 难度三个旋钮：`maxAircraft`（同时压力）、航班密度（`atMin` 间隔）、`targetMovements`（评级门槛）
+- `operations?: OperationDef[]` 可添加固定运行窗口。每项有唯一 `id`、`name`、`announceMin`（预告）、`atMin`（计划生效）、`durationSec`（持续游戏秒）。`kind: "inspection"` 可在预告后提前开始；到时暂停新许可，待已承诺航班清空后开始，持续时间按实际开始计算。`kind: "weather"` 另有 `wind: { dirDeg, speedKt, gustKt? }`，按固定时刻生效并恢复基准风况；天气窗口不可重叠。事件结束应落在班次时长内。
+- 跑道风分量和轻 / 中 / 重型 15 / 24 / 28kt 侧风限制在 `sim/operations.ts`，属于游戏规则。已进入跑道与已获落地许可的航班不因天气或检查被抢占。新增事件需测试预告、共享许可守卫、恢复、计划预测和确定性回放，避免制造无法提前处理的失败。
 
 加完在 `src/data/levels.ts` 的 `LEVELS` 数组里登记即可，开始界面自动出现。
 
@@ -116,6 +125,9 @@ const MY_LEVEL: LevelDef = {
 | `&bot=1` | 快进期间让测试机器人接管（能直接看到落地/起飞的场面） |
 | `&lite=1` | 关阴影、锁 1 倍像素比（无头截图用，正常玩不要加） |
 | `&view=tower\|follow\|top` | 指定初始视角 |
+| `&mode=standard` | 标准模式：滑行许可和席位移交；默认调试使用辅助模式 |
+| `&seed=KESTREL-2026` | `level=seed-challenge` 时指定可重复挑战种子 |
+| `&paused=1` | 完成 URL 快进后保持暂停，方便检查特定运行窗口或截图 |
 
 例：`http://localhost:5173/?level=morning-rush&fast=700&bot=1`
 
@@ -125,8 +137,7 @@ const MY_LEVEL: LevelDef = {
 
 ```bash
 cd atc-sim
-npm run typecheck
-npm run sim:test    # 含"每个机位都能滑到跑道外等待点"这类数据校验
+npm run accept      # 类型、数据、玩法、排序、挑战及边界回归
 npm run build
 ```
 

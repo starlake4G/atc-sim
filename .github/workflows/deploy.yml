@@ -1,0 +1,48 @@
+name: Deploy to GitHub Pages
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: atc-sim/package-lock.json
+      - name: 安装依赖
+        run: npm ci
+        working-directory: atc-sim
+      - name: 类型检查 + 逻辑回归（108 项）
+        run: npm run accept
+        working-directory: atc-sim
+      - name: 构建（项目页需要 /atc-sim/ 基路径）
+        run: npx vite build --base=/atc-sim/
+        working-directory: atc-sim
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: atc-sim/dist
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4
