@@ -4,7 +4,7 @@ import { getType } from "../src/data/aircraft-types";
 import { World } from "../src/sim/world";
 import { spawnArrival, spawnDeparture } from "../src/sim/aircraft";
 import { approachRunwayETA, departurePreparationSec, departureWindow, departureWindowEstimates, runwayBlockReason } from "../src/sim/runway";
-import { summarizePlan } from "../src/sim/planning";
+import { summarizePlan, type RunwayPlanEntry } from "../src/sim/planning";
 import { ReplayPlayer } from "../src/sim/replay";
 import { makeRoute } from "../src/sim/route";
 import { kt } from "../src/sim/units";
@@ -76,17 +76,17 @@ test("重型与轻型试排能比较尾流代价，反复预览不改变世界�
   world.changeRunwayPlan(heavy.id, "add"); world.changeRunwayPlan(light.id, "add");
   const before = world.snapshot(), journal = world.exportReplay(); let result = world.runwayPlan.previewMove(world, light.id, -1);
   for (let i = 0; i < 12; i++) result = world.runwayPlan.previewMove(world, light.id, -1);
-  assert(result.ok); const original = summarizePlan(before.runwayPlan), preview = summarizePlan(result.entries);
+  assert(result.ok); const original = summarizePlan(before.runwayPlan), preview = summarizePlan((result as { ok: true; entries: RunwayPlanEntry[] }).entries);
   assert(original.lastClearAt! - preview.lastClearAt! > 100); assert(preview.totalDelaySec! < original.totalDelaySec!);
   assert.deepEqual(world.snapshot(), before); assert.deepEqual(world.exportReplay(), journal);
-  result.entries[0]!.callsign = "MUTATED"; assert.equal(world.snapshot().runwayPlan[0]!.callsign, "HEAVY");
+  (result as { ok: true; entries: RunwayPlanEntry[] }).entries[0]!.callsign = "MUTATED"; assert.equal(world.snapshot().runwayPlan[0]!.callsign, "HEAVY");
 });
 
 test("试排遵守承诺边界，越过锁定前机、无效航班和边界都明确拒绝", () => {
   const world = fixture(), heavy = dep(world, "heavy", "B77W"), light = dep(world, "light");
   world.changeRunwayPlan(heavy.id, "add"); world.changeRunwayPlan(light.id, "add"); heavy.phase = "lineup"; world.runwayOccupantId = heavy.id;
   const before = world.snapshot(); const result = world.runwayPlan.previewMove(world, light.id, -1);
-  assert(!result.ok); assert.match(result.reason, /锁定/); assert(!world.runwayPlan.previewMove(world, heavy.id, -1).ok); assert(!world.runwayPlan.previewMove(world, "missing", 1).ok);
+  assert(!result.ok); assert.match((result as { ok: false; reason: string }).reason, /锁定/); assert(!world.runwayPlan.previewMove(world, heavy.id, -1).ok); assert(!world.runwayPlan.previewMove(world, "missing", 1).ok);
   assert.deepEqual(world.snapshot(), before);
 });
 
@@ -94,7 +94,7 @@ test("待定方案不把未知当零延误，交换后仍有等待时不虚假�
   const world = fixture(), heavy = dep(world, "heavy", "B77W"), light = dep(world, "light"); heavy.holding = true;
   world.changeRunwayPlan(heavy.id, "add"); world.changeRunwayPlan(light.id, "add");
   const original = summarizePlan(world.snapshot().runwayPlan), result = world.runwayPlan.previewMove(world, light.id, -1); assert(result.ok);
-  const preview = summarizePlan(result.entries); assert.equal(original.totalDelaySec, null); assert.equal(preview.totalDelaySec, null); assert.equal(preview.lastClearAt, null);
+  const preview = summarizePlan((result as { ok: true; entries: RunwayPlanEntry[] }).entries); assert.equal(original.totalDelaySec, null); assert.equal(preview.totalDelaySec, null); assert.equal(preview.lastClearAt, null);
   assert.equal(original.known, 0); assert.equal(preview.known, 1); assert.match(preview.waitReason!, /等待继续滑行/);
 });
 
@@ -102,19 +102,19 @@ test("试排沿用检查和风况窗口，预测上下文不会污染实际事�
   const world = fixture([{ id: "gust", name: "阵风", kind: "weather", announceMin: 0, atMin: 0, durationSec: 120, wind: { dirDeg: 210, speedKt: 18, gustKt: 26 } }]); world.step();
   const light = dep(world, "light"), jet = dep(world, "jet", "E190"); world.changeRunwayPlan(light.id, "add"); world.changeRunwayPlan(jet.id, "add");
   const before = world.snapshot(), result = world.runwayPlan.previewMove(world, jet.id, -1); assert(result.ok);
-  assert(result.entries[0]!.occupyAt! < before.runwayPlan[0]!.occupyAt!); assert(result.entries[1]!.occupyAt! >= 120);
+  const res = result as { ok: true; entries: RunwayPlanEntry[] }; assert(res.entries[0]!.occupyAt! < before.runwayPlan[0]!.occupyAt!); assert(res.entries[1]!.occupyAt! >= 120);
   assert.deepEqual(world.snapshot(), before);
   const check = fixture([{ id: "check", name: "检查", kind: "inspection", announceMin: 0, atMin: 5, durationSec: 60 }]); check.step(); check.startInspection("check");
   const a = dep(check, "a"), b = dep(check, "b", "E190"); check.changeRunwayPlan(a.id, "add"); check.changeRunwayPlan(b.id, "add");
   const events = check.operations.snapshot(), checked = check.runwayPlan.previewMove(check, b.id, -1); assert(checked.ok);
-  assert(checked.entries[0]!.occupyAt! >= events[0]!.endsAt!); assert.deepEqual(check.operations.snapshot(), events);
+  const cr = checked as { ok: true; entries: RunwayPlanEntry[] }; assert(cr.entries[0]!.occupyAt! >= events[0]!.endsAt!); assert.deepEqual(check.operations.snapshot(), events);
 });
 
 test("采用预览才生成一次真实改序，回放可精确重建被采用的计划", () => {
   const world = new World(getLevel("intersection"), { mode: "standard" }); world.step(); const [first, second] = world.aircraftList();
   world.changeRunwayPlan(first!.id, "add"); world.changeRunwayPlan(second!.id, "add"); const count = world.exportReplay().actions.length;
   const preview = world.runwayPlan.previewMove(world, second!.id, -1); assert(preview.ok); assert.equal(world.exportReplay().actions.length, count);
-  assert(world.changeRunwayPlan(second!.id, "up").ok); assert.equal(world.exportReplay().actions.length, count + 1); assert.deepEqual(world.snapshot().runwayPlan, preview.entries);
+  assert(world.changeRunwayPlan(second!.id, "up").ok); assert.equal(world.exportReplay().actions.length, count + 1); assert.deepEqual(world.snapshot().runwayPlan, (preview as { ok: true; entries: RunwayPlanEntry[] }).entries);
   const player = new ReplayPlayer(world.exportReplay()); player.seek(world.time); assert.deepEqual(player.world.snapshot(), world.snapshot());
 });
 console.log(`\n调度决策回归通过 ${passed} 项`);
