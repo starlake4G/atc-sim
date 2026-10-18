@@ -30,7 +30,7 @@ export function pavementMaterial(kind: "concrete" | "asphalt" | "runway", detail
   }
   const map = new THREE.CanvasTexture(canvas); map.colorSpace = THREE.SRGBColorSpace;
   const roughnessMap = new THREE.CanvasTexture(roughCanvas);
-  for (const texture of [map, roughnessMap]) { texture.wrapS = texture.wrapT = THREE.RepeatWrapping; texture.anisotropy = 4; }
+  for (const texture of [map, roughnessMap]) { texture.wrapS = texture.wrapT = THREE.RepeatWrapping; texture.anisotropy = 8; texture.generateMipmaps = true; texture.minFilter = THREE.LinearMipmapLinearFilter; }
   const material = new THREE.MeshStandardMaterial({ color: 0xffffff, map, roughnessMap: detailed ? roughnessMap : null, bumpMap: detailed ? roughnessMap : null, bumpScale: .018, roughness: 1, metalness: 0 });
   if (!detailed) roughnessMap.dispose();
   material.userData.worldTile = kind === "concrete" ? 32 : 9;

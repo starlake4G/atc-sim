@@ -61,7 +61,7 @@ export function buildAirportModel(idx: AirportIndex, period: LightPeriod = "day"
   box(2400, .04, 45, 0, .02, 0, runwayMat);
   line({ x: -1190, y: 20 }, { x: 1190, y: 20 }, .7, white);
   line({ x: -1190, y: -20 }, { x: 1190, y: -20 }, .7, white);
-  for (let x = -1060; x <= 1060; x += 110) box(48, .035, 1, x, .11, 0, white);
+  for (let x = -1060; x <= 1060; x += 110) box(48, .035, 1.6, x, .11, 0, white);
   for (const side of [-1, 1]) {
     for (const y of [-15, -11, -7, 7, 11, 15]) box(38, .04, 2, side * 1160, .12, y, white);
     for (const y of [-10, 10]) box(45, .04, 5, side * 900, .12, y, white);
@@ -87,7 +87,7 @@ export function buildAirportModel(idx: AirportIndex, period: LightPeriod = "day"
     if (points.length > 2) { ribbon(points, 25, concrete, .04); ribbon(points, 21, asphalt, .08); ribbon(points, .65, yellow, .14); continue; }
     for (let i = 1; i < points.length; i++) {
       const a = points[i - 1]!, b = points[i]!;
-      line(a, b, 25, concrete, .02); line(a, b, 21, asphalt, .06); line(a, b, .65, yellow, .12);
+      line(a, b, 25, concrete, .02); line(a, b, 21, asphalt, .06); line(a, b, 1.5, yellow, .12);
     }
   }
   box(1300, .035, 175, -200, .015, 450, concrete);
