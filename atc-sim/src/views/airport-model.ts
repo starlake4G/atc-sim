@@ -14,7 +14,7 @@ export function buildAirportModel(idx: AirportIndex, period: LightPeriod = "day"
     return cache.get(key)!;
   };
   const asphalt = pavementMaterial("asphalt", detailed), runwayMat = pavementMaterial("runway", detailed), concrete = pavementMaterial("concrete", detailed);
-  const white = mat(0xe5e5db), yellow = mat(0xe6bb50), wall = mat(0xc3c8c7), metal = mat(0x667b88, .42, .55);
+  const white = mat(0xe5e5db), yellow = mat(0xe6bb50), wall = mat(0xc3c8c7), metal = mat(0x667b88, .42, .55), roofMat = mat(0x6b757b, .82, .08);
   function box(w: number, h: number, d: number, x: number, y: number, z: number, material: THREE.Material) {
     const mesh = new THREE.Mesh(new THREE.BoxGeometry(w, h, d), material); mesh.position.set(x, y, -z); mesh.castShadow = h > 2; mesh.receiveShadow = true; root.add(mesh); return mesh;
   }
@@ -139,7 +139,7 @@ export function buildAirportModel(idx: AirportIndex, period: LightPeriod = "day"
     for (let offset = -60; offset <= 60; offset += 15) box(.5, .4, 104, x + offset, 22 + 12 * (1 - Math.abs(offset) / 75) + .2, -260, wall);
   }
   box(1370, 17, 72, -200, 8.5, 605, wall);
-  box(1390, 1.2, 82, -200, 18, 605, metal);
+  box(1390, 1.2, 82, -200, 18, 605, roofMat);
   box(1394, .5, 84, -200, 18.8, 605, white);
   const glass = terminalGlassMaterial(period !== "day");
   box(1340, 10.5, 1, -200, 10, 568.5, glass);

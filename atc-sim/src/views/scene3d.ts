@@ -149,8 +149,8 @@ export class Scene3D {
     this.controls.touches.ONE = view === "top" ? THREE.TOUCH.PAN : THREE.TOUCH.ROTATE;
     if (view === "tower") {
       this.controls.enabled = true;
-      this.camera.position.set(1000, 640, 880);
-      this.controls.target.set(-40, 0, wz(190));
+      this.camera.position.set(1080, 560, 840);
+      this.controls.target.set(140, 0, wz(120));
     } else if (view === "top") {
       this.controls.enabled = true;
       this.camera.up.set(0, 0, -1);
