@@ -1,10 +1,10 @@
 import { getAirport } from "../data/airports";
 import { getType } from "../data/aircraft-types";
 import { buildAirport, distanceToThreshold, type AirportIndex } from "./airport";
-import { isAirborne, spawnArrival, spawnDeparture, stepAircraft } from "./aircraft";
+import { spawnArrival, spawnDeparture, stepAircraft } from "./aircraft";
 import { availableCommands, executeCommand, previewCommand, readbackText, seatOf } from "./commands";
 import { completeHandoff, transmissionSeconds } from "./radio";
-import { aircraftCollide, hitsGroundObstacle } from "./collision";
+import { hitsGroundObstacle } from "./collision";
 import type { SimEnv } from "./env";
 import { Rng } from "./rng";
 import { challengeSeedHash } from "./challenge";
@@ -16,12 +16,11 @@ import { delayReason, emptyDelays } from "./debrief";
 import type { JournalAction, PlanEdit, ReplayRecord } from "./journal";
 import type { Aircraft, Command, CommandOption, CommandResult, ControlMode, LevelDef, MovementReport, RadioLine, SafetyMode, Seat, SimEvent, SimState } from "./types";
 import { dist, dot, sub } from "./vec";
-import { ft, nm } from "./units";
 import { OperationsManager, inspectionVehiclePose } from "./operations";
+import { findAirConflicts, findCollision, findParkedToRemove, findSectorViolations } from "./safety";
 
-export const TICK = 0.1;
-/** 1× is real time. Faster controls and next-request skipping are explicit player choices. */
-export const TIME_SCALE = 1;
+import { TICK, TIME_SCALE } from "./constants";
+export { TICK, TIME_SCALE };
 
 export class World implements SimEnv {
   readonly level: LevelDef;
@@ -338,28 +337,15 @@ export class World implements SimEnv {
   }
 
   private updateConflicts(): void {
-    const air = this.aircraftList().filter((a) => isAirborne(a) && a.altM > 40);
-    const found: string[] = [];
-    for (let i = 0; i < air.length; i++) {
-      for (let j = i + 1; j < air.length; j++) {
-        const a = air[i]!;
-        const b = air[j]!;
-        const h = dist(a.pos, b.pos);
-        const v = Math.abs(a.altM - b.altM);
-        if (h < nm(3) && v < ft(1000)) {
-          found.push(`${a.id}|${b.id}`);
-          if (h < nm(2) && v < ft(600)) {
-            const key = [a.id, b.id].sort().join("|");
-            const last = this.violationCooldown.get(key) ?? -999;
-            if (this.time - last > 90) {
-              this.violationCooldown.set(key, this.time);
-              this.addViolation(a, `与 ${b.callsign} 失去间隔`, 15);
-            }
-          }
-        }
-      }
+    const found = findAirConflicts(this.aircraftList());
+    this.conflicts = found.map((c) => c.key);
+    for (const c of found) {
+      if (!c.severe) continue;
+      const last = this.violationCooldown.get(c.key) ?? -999;
+      if (this.time - last <= 90) continue;
+      this.violationCooldown.set(c.key, this.time);
+      this.addViolation(c.a, `与 ${c.b.callsign} 失去间隔`, 15);
     }
-    this.conflicts = found;
   }
 
   private checkCollisions(): void {
@@ -370,13 +356,8 @@ export class World implements SimEnv {
       const hit = aircraft.find((ac) => hitsGroundObstacle(ac, vehicle, this.idx.def.elevationM));
       if (hit) { this.failShift(hit, "与跑道检查车发生碰撞"); return; }
     }
-    for (let i = 0; i < aircraft.length; i++) for (let j = i + 1; j < aircraft.length; j++) {
-      const a = aircraft[i]!, b = aircraft[j]!;
-      if (Math.hypot(a.pos.x - b.pos.x, a.pos.y - b.pos.y) > a.lengthM + b.lengthM + (a.gs + b.gs) * TICK) continue;
-      if (!aircraftCollide(a, b)) continue;
-      this.failShift(a, `与 ${b.callsign} 发生碰撞`);
-      return;
-    }
+    const pair = findCollision(aircraft);
+    if (pair) this.failShift(pair[0], `与 ${pair[1].callsign} 发生碰撞`);
   }
 
   failShift(ac: Aircraft, reason: string): void {
@@ -397,21 +378,14 @@ export class World implements SimEnv {
   }
 
   private checkSector(): void {
-    for (const ac of this.aircraftList()) {
-      if (ac.phase === "done") continue;
-      if (dist(ac.pos, { x: 0, y: 0 }) > 42000) {
-        this.addViolation(ac, "飞出扇区", 8);
-        this.finish(ac);
-      }
+    for (const ac of findSectorViolations(this.aircraftList())) {
+      this.addViolation(ac, "飞出扇区", 8);
+      this.finish(ac);
     }
   }
 
   private checkParked(): void {
-    for (const ac of this.aircraftList()) {
-      if (ac.phase === "parked" && ac.kind === "arr" && ac.removeAt !== null && this.time >= ac.removeAt) {
-        this.finish(ac);
-      }
-    }
+    for (const ac of findParkedToRemove(this.aircraftList(), this.time)) this.finish(ac);
   }
 
   // ---------- 玩家操作 ----------

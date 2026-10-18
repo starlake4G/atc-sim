@@ -135,10 +135,34 @@ export function availableCommands(ac: Aircraft, env: SimEnv): CommandOption[] {
   return out.map((option) => ({ ...option, disabledReason: ac.pendingClearance ? "无线电通话中，等待复诵确认" : option.command.kind === "handoff" && ac.pendingHandoff ? "移交已确认，等待生效条件" : option.disabledReason }));
 }
 
-/** Validate against an isolated aircraft and side-effect-free world facade. */
+type SimEnvFunctionKeys = {
+  [K in keyof SimEnv]-?: SimEnv[K] extends (...args: never[]) => unknown ? K : never;
+}[keyof SimEnv];
+
+/** 预览时被替换成空实现的方法（只承认写操作）。新增写方法必须先在这里登记。 */
+const PREVIEW_NOOP_KEYS = [
+  "say", "notify", "countLanding", "countTakeoff", "countGoAround", "countService", "countHandoff",
+  "addViolation", "occupyRunway", "vacateRunway", "finish",
+] as const satisfies readonly SimEnvFunctionKeys[];
+
+/** 预览可以透传的只读方法。 */
+const PREVIEW_PASSTHROUGH_KEYS = ["aircraftList", "assignStand"] as const satisfies readonly SimEnvFunctionKeys[];
+
+type UnclassifiedEnvMethod = Exclude<SimEnvFunctionKeys, (typeof PREVIEW_NOOP_KEYS)[number] | (typeof PREVIEW_PASSTHROUGH_KEYS)[number]>;
+type AssertNever<T extends never> = T;
+/** 给 SimEnv 加了新方法却没分类时，这一行会编译失败并报出方法名。 */
+export type PreviewCoversEveryMethod = AssertNever<UnclassifiedEnvMethod>;
+
+/**
+ * Validate against an isolated aircraft and side-effect-free world facade.
+ * 这里的"影子环境"依赖上方的方法分类：写方法必须 no-op，否则预览会改真实世界。
+ * scripts/control-test.ts 还有一条泛化断言（任意可用指令预览前后快照相同）兜底。
+ */
 export function previewCommand(env: SimEnv, ac: Aircraft, cmd: Command): CommandResult {
   const noop = () => {};
-  const preview = Object.assign(Object.create(env) as SimEnv, { say: noop, notify: noop, countLanding: noop, countTakeoff: noop, countGoAround: noop, countService: noop, countHandoff: noop, addViolation: noop, occupyRunway: noop, vacateRunway: noop, finish: noop, failShift: noop, groundLocks: new Map(env.groundLocks) });
+  const overrides: Partial<Record<(typeof PREVIEW_NOOP_KEYS)[number], () => void>> = {};
+  for (const key of PREVIEW_NOOP_KEYS) overrides[key] = noop;
+  const preview = Object.assign(Object.create(env) as SimEnv, overrides, { groundLocks: new Map(env.groundLocks) });
   return executeCommand(preview, { ...ac, pos: { ...ac.pos }, approach: ac.approach ? { ...ac.approach } : null, scored: { ...ac.scored } }, cmd);
 }
 
